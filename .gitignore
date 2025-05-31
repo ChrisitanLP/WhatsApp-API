@@ -1,0 +1,17 @@
+# IDE
+node_modules/
+
+# Directorios
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Archivos temporales
+temp/
+media/
+
+# Variables entorno y configuración
+config.js
+.env
+
+# Logs específicos del proyecto
+logs/
