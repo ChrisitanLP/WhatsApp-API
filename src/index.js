@@ -3,8 +3,8 @@ const express = require('express');
 const path = require('path');
 const WebSocket = require('ws');
 const whatsapp = require('./lib/whatsapp');
-const WebSocketHandler = require('./conf/websocket');
-const logger = require('./conf/logger');
+const WebSocketHandler = require('./handlers/websocket');
+const logger = require('./config/logger');
 const MessageProcessor = require('./utils/messageProcessor');
 const http = require('http');
 
