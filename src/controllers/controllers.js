@@ -2,7 +2,7 @@ const { MessageMedia } = require('whatsapp-web.js');
 const WhatsAppService = require('../services/services');
 const whatsappService = new WhatsAppService();
 const { ValidationError, NotFoundError } = require('../utils/asyncHandler');
-const { logger } = require('../conf/logger');
+const { logger } = require('../config/logger');
 
 class WhatsAppController {
   constructor() {
