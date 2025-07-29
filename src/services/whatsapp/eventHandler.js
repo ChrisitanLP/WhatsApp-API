@@ -56,11 +56,29 @@ class EventHandler extends EventEmitter {
 
     handleMessage(number, message) {
         try {
+            // Log inmediato en el EventHandler
+            logger.info(`Mensaje de Whatsapp - Account: ${number}, From: ${message.from}, Message: ${message.body}, Type: ${message.type}, ID: ${message.id?._serialized || message.id}`);
+
+            // Verificar si es mensaje de estado (ignorar)
             if (message.from === 'status@broadcast') {
+                logger.debug(`Status message ignored for account ${number}`);
                 this.emit('statusMessage', number, message);
                 return;
             }
+
+            // Log adicional para mensajes de grupo
+            if (message.isGroupMsg) {
+                logger.debug(`Group message from ${message.chat?.name || 'Unnamed Group'} in account ${number}`);
+            }
+
+            // Log para media
+            if (message.hasMedia) {
+                logger.debug(`Media message received - Account: ${number}, Type: ${message.type}`);
+            }
+
+            // Emitir evento para que lo procese el cliente principal
             this.emit('messageReceived', number, message);
+            
         } catch (error) {
             logger.error(`Error processing message for ${number}:`, error);
         }
