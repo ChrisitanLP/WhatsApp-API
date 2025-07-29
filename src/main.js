@@ -72,6 +72,7 @@ class WhatsAppServer {
             this.setupStaticFiles();
             this.setupRoutes();
             this.setupWebSocket();
+            this.setupWebSocketEvents()
             await this.initializeWhatsApp();
             this.setupWhatsAppEvents();
 
@@ -339,6 +340,32 @@ class WhatsAppServer {
         });
     }
 
+    setupWebSocketEvents() {
+        if (!this.webSocketHandler) {
+            logger.warn('WebSocket handler not available for event setup');
+            return;
+        }
+
+        // Escuchar eventos del WebSocket handler
+        this.webSocketHandler.on('client_message', (data) => {
+            logger.debug(`WebSocket client message from ${data.connectionId}: ${data.data.action || 'unknown'}`);
+        });
+
+        // Escuchar métricas del WebSocket
+        this.webSocketHandler.on('metrics', (metrics) => {
+            if (this.isShuttingDown) return;
+            
+            // Log periódico de métricas (cada 5 minutos)
+            if (!this.lastMetricsLog || (Date.now() - this.lastMetricsLog) > 300000) {
+                logger.info(`WebSocket metrics - Connections: ${metrics.activeConnections}, Messages: ${metrics.messagesSent}/${metrics.messagesReceived}, Broadcasts: ${metrics.broadcastsSent}`);
+                
+                this.lastMetricsLog = Date.now();
+            }
+        });
+
+        logger.info('WebSocket events configured');
+    }
+
     async initializeWhatsApp() {
         try {
             this.whatsappClient = new WhatsAppClient();
@@ -467,6 +494,14 @@ class WhatsAppServer {
 
     async handleMessage({ number, message }) {
         try {
+            // Log conciso del mensaje entrante
+            logger.debug(`Processing WhatsApp message - Account: ${number}, From: ${message.from || 'N/A'},  Message: ${message.body || 'Sin contenido'}, Type: ${message.type || 'unknown'}`);
+
+            // Log detallado en WebSocket handler si existe
+            if (this.webSocketHandler && this.webSocketHandler.logIncomingMessage) {
+                this.webSocketHandler.logIncomingMessage(number, message);
+            }
+
             // Procesar mensaje con timeout
             const processedMessage = await Promise.race([
                 MessageProcessor.processMessage(number, message),
@@ -480,8 +515,22 @@ class WhatsAppServer {
                 return;
             }
 
-            this.broadcastToWebSocketClients('message', processedMessage);
+            // Broadcast a WebSocket con logging
+            logger.debug(`Broadcasting message to WebSocket subscribers of ${number}`);
+            
+            // Usar broadcastToSubscribers si está disponible, sino usar el método genérico
+            if (this.webSocketHandler && this.webSocketHandler.broadcastToSubscribers) {
+                await this.webSocketHandler.broadcastToSubscribers('message', processedMessage || message, number);
+            } else {
+                this.broadcastToWebSocketClients('message', { 
+                    number, 
+                    message: processedMessage || message 
+                });
+            }
+
             this.metrics.recordEvent('message_processed', { number });
+            logger.debug(`Message from ${number} processed successfully`);
+            
         } catch (error) {
             logger.error(`Error processing message from ${number}:`, error);
             this.metrics.recordEvent('message_error', { number, error: error.message });
