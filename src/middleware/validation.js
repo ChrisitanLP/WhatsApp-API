@@ -1,6 +1,6 @@
 // middleware/validation.js
 const { validationResult, param, body, query } = require('express-validator');
-const logger = require('../conf/logger');
+const logger = require('../config/logger');
 
 // Constantes para mensajes de error comunes
 const ERROR_MESSAGES = {
