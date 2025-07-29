@@ -3,9 +3,11 @@ module.exports = {
     // HTTP Status Codes
     HTTP_STATUS: {
         OK: 200,
+        CREATED: 201,
         ACCEPTED: 202,
         BAD_REQUEST: 400,
         NOT_FOUND: 404,
+        CONFLICT: 409,
         INTERNAL_SERVER_ERROR: 500
     },
 
@@ -44,7 +46,14 @@ module.exports = {
             QR_NOT_AVAILABLE: 'QR code not available',
             QR_GENERATION_IN_PROGRESS: 'QR code generation in progress, please try again shortly',
             INVALID_PAGE_NUMBER: 'Número de página inválido',
-            INTERNAL_SERVER_ERROR: 'Error interno del servidor.'
+            INTERNAL_SERVER_ERROR: 'Error interno del servidor.',
+            MESSAGE_NOT_FOUND: 'Message not found',
+            CHAT_NOT_FOUND: 'Chat not found',
+            CLIENT_NOT_READY: 'Client is not ready',
+            INVALID_MESSAGE_CONTENT: 'Invalid message content',
+            MESSAGE_SEARCH_TIMEOUT: 'Message search timeout',
+            FORWARD_FAILED: 'Failed to forward message',
+            EDIT_FAILED: 'Failed to edit message'
         },
         VALIDATION: {
             NUMBER_REQUIRED: 'Number is required',
