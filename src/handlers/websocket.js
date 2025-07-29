@@ -1,7 +1,3 @@
-// ===============================
-// 5. MEJORAS EN handlers/websocket.js
-// ===============================
-
 const WebSocket = require('ws');
 const { wsLogger: logger } = require('../config/logger');
 const EventEmitter = require('events');
@@ -148,7 +144,9 @@ class WebSocketHandler extends EventEmitter {
             }
 
             const data = JSON.parse(message);
-            logger.debug(`WebSocket mensaje recibido de ${ws.id}: ${data.action || 'unknown'}`);
+            
+            // Log mejorado para debugging
+            logger.info(`[WebSocket] Mensaje recibido de cliente ${ws.id} (IP: ${ws.ip}): ${data.action || 'unknown'}`);
 
             // Procesar diferentes tipos de mensajes
             switch (data.action) {
@@ -222,11 +220,17 @@ class WebSocketHandler extends EventEmitter {
         
         this.subscribers.get(data.number).add(ws);
         
-        logger.info(`Cliente ${ws.id} suscrito al número: ${data.number}`);
+        // Log detallado de suscripción
+        logger.info(`[WebSocket] Cliente ${ws.id} suscrito al número ${data.number} (IP: ${ws.ip})`);
+        logger.debug(`[WebSocket] Total suscriptores para ${data.number}: ${this.subscribers.get(data.number).size}`);
         
         this.sendToClient(ws, {
             type: 'subscription_confirmed',
-            data: { number: data.number }
+            data: { 
+                number: data.number,
+                totalSubscribers: this.subscribers.get(data.number).size,
+                subscriptionTime: new Date().toISOString()
+            }
         });
     }
 
@@ -236,9 +240,14 @@ class WebSocketHandler extends EventEmitter {
         if (number && this.subscribers.has(number)) {
             this.subscribers.get(number).delete(ws);
             
-            if (this.subscribers.get(number).size === 0) {
+            const remainingSubscribers = this.subscribers.get(number).size;
+            
+            if (remainingSubscribers === 0) {
                 this.subscribers.delete(number);
             }
+            
+            logger.info(`[WebSocket] Cliente ${ws.id} desuscrito del número ${number}`);
+            logger.debug(`[WebSocket] Suscriptores restantes para ${number}: ${remainingSubscribers}`);
         }
         
         ws.subscribedNumber = null;
@@ -382,6 +391,7 @@ class WebSocketHandler extends EventEmitter {
         
         if (!subscribers || subscribers.size === 0) {
             logger.debug(`No hay suscriptores para el número ${number}`);
+            console.log(`📭 Sin suscriptores para el número ${number}`);
             return;
         }
         
@@ -393,9 +403,36 @@ class WebSocketHandler extends EventEmitter {
             timestamp: new Date().toISOString()
         };
         
-        logger.info(`Enviando ${eventType} a ${subscribers.size} suscriptores del número ${number}`);
+        // Log detallado para mensajes de WhatsApp
+        if (eventType === 'message') {
+            logger.info(`WhatsApp message received - Cuenta: ${number}, De: ${data.from || 'Unknown'}, Tipo: ${data.type || 'text'}, Mensaje: ${data.body || 'Sin contenido'}, Subscribers: ${subscribers.size}`);
+        }
+        
+        logger.debug(`Broadcasting ${eventType} to ${subscribers.size} subscribers of ${number}`);
         
         await this.sendToClients(Array.from(subscribers), message, options);
+    }
+
+    logIncomingMessage(number, messageData) {
+        try {
+            const logData = {
+                timestamp: new Date().toISOString(),
+                number: number,
+                from: messageData.from || 'Desconocido',
+                body: messageData.body || 'Sin contenido',
+                type: messageData.type || 'text',
+                hasMedia: Boolean(messageData.hasMedia),
+                isGroupMsg: Boolean(messageData.isGroupMsg),
+                chat: messageData.chat?.name || messageData.from
+            };
+
+            // Log estructurado para backend
+            logger.info(`WhatsApp message - Cuenta: ${number}, De: ${logData.from}, Mensaje: ${logData.body}, Tipo: ${logData.type}${logData.isGroupMsg ? ', Group: ' + logData.chat : ''}${logData.hasMedia ? ', Has Media: Yes' : ''}`);
+            
+            return logData;
+        } catch (error) {
+            logger.error('Error logging incoming message:', error);
+        }
     }
 
     // Envío optimizado con queue para manejar alta concurrencia
@@ -575,6 +612,11 @@ class WebSocketHandler extends EventEmitter {
         const subscriberMetrics = {};
         for (const [number, subscribers] of this.subscribers.entries()) {
             subscriberMetrics[number] = subscribers.size;
+        }
+
+        if (!this.lastMetricsLog || (Date.now() - this.lastMetricsLog) > 300000) {
+            logger.info(`WebSocket metrics - Active: ${this.metrics.activeConnections}, Sent: ${this.metrics.messagesSent}, Received: ${this.metrics.messagesReceived}, Broadcasts: ${this.metrics.broadcastsSent}`);
+            this.lastMetricsLog = Date.now();
         }
         
         this.emit('metrics', {
