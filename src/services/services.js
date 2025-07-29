@@ -4,7 +4,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const { MessageMedia } = require('whatsapp-web.js');
 const { NotFoundError, ValidationError } = require('../utils/asyncHandler');
-const { logger } = require('../conf/logger');
+const { logger } = require('../config/logger');
 const { AES } = require('../utils/encryption');
 const WhatsAppClient = require('../lib/whatsapp');
 
