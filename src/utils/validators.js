@@ -215,15 +215,6 @@ class MessageValidators extends BaseValidator {
         return { clientId, groupId, mensaje };
     }
 
-    static sendMedia(body) {
-        const { clientId, tel, isGroup } = body;
-        
-        this.required(clientId, 'Client ID');
-        this.phoneNumber(tel, 'Telephone number');
-        
-        return { clientId, tel, isGroup };
-    }
-
     static replyToMessage(body) {
         const { clientId, tel, messageId, reply, isGroup } = body;
         
@@ -236,13 +227,55 @@ class MessageValidators extends BaseValidator {
     }
 
     static messageAction(body) {
-        const { clientId, tel, messageId, isGroup } = body;
+        const { clientId, tel, messageId, isGroup, forEveryone } = body;
         
         this.required(clientId, 'Client ID');
         this.phoneNumber(tel, 'Telephone number');
         this.required(messageId, 'Message ID');
         
-        return { clientId, tel, messageId, isGroup };
+        return { clientId, tel, messageId, isGroup, forEveryone };
+    }
+
+    static sendMedia(body) {
+        const { clientId, tel, isGroup } = body;
+        
+        this.required(clientId, 'Client ID');
+        this.phoneNumber(tel, 'Telephone number');
+        
+        return { clientId, tel, isGroup };
+    }
+
+    static forwardMessage(body) {
+        const { clientId, fromTel, toTel, messageId, isGroupFrom, isGroupTo } = body;
+        
+        this.required(clientId, 'Client ID');
+        this.phoneNumber(fromTel, 'From telephone number');
+        this.phoneNumber(toTel, 'To telephone number');
+        this.required(messageId, 'Message ID');
+        
+        return { clientId, fromTel, toTel, messageId, isGroupFrom, isGroupTo };
+    }
+
+    static sendMessageWithMention(body) {
+        const { clientId, tel, isGroup, mentionTel, message } = body;
+        
+        this.required(clientId, 'Client ID');
+        this.phoneNumber(tel, 'Telephone number');
+        this.phoneNumber(mentionTel, 'Mention telephone number');
+        this.required(message, 'Message');
+        
+        return { clientId, tel, isGroup, mentionTel, message };
+    }
+
+    static editMessage(body) {
+        const { clientId, tel, messageId, newContent, isGroup } = body;
+        
+        this.required(clientId, 'Client ID');
+        this.phoneNumber(tel, 'Telephone number');
+        this.required(messageId, 'Message ID');
+        this.required(newContent, 'New content');
+        
+        return { clientId, tel, messageId, newContent, isGroup };
     }
 }
 

@@ -31,16 +31,10 @@ class MessageController {
     });
 
     replyToMessage = asyncHandler(async (req, res) => {
-        const data = MessageValidators.replyToMessage(req.body);
-        await this.whatsappService.replyToMessage(
-            data.clientId,
-            data.tel,
-            data.messageId,
-            data.reply,
-            data.isGroup
-        );
-        logger.info(`Respuesta enviada a ${data.tel} - Cliente: ${data.clientId}`);
-
+        const { clientId, tel, messageId, reply, isGroup } = MessageValidators.replyToMessage(req.body);
+        await this.whatsappService.replyToMessage(clientId, tel, messageId, reply, isGroup);
+        logger.info(`Respuesta enviada a ${tel} - Cliente: ${clientId}`);
+        
         return ResponseHelper.success(res, null, 'Reply sent successfully');
     });
 
@@ -53,24 +47,11 @@ class MessageController {
     });
 
     forwardMessage = asyncHandler(async (req, res) => {
-        // Agregar validador específico si es necesario, o validar campos críticos
-        const { clientId, fromTel, toTel, messageId, isGroupFrom, isGroupTo } = req.body;
-        MessageValidators.required(clientId, 'Client ID');
-        MessageValidators.phoneNumber(fromTel, 'From telephone number');
-        MessageValidators.phoneNumber(toTel, 'To telephone number');
-        MessageValidators.required(messageId, 'Message ID');
-        
-        await this.whatsappService.forwardMessage(
-            clientId,
-            fromTel,
-            toTel,
-            messageId,
-            isGroupFrom,
-            isGroupTo
-        );
+        const { clientId, fromTel, toTel, messageId, isGroupFrom, isGroupTo } = MessageValidators.forwardMessage(req.body);
+        await this.whatsappService.forwardMessage(clientId, fromTel, toTel, messageId, isGroupFrom, isGroupTo);
         logger.info(`Mensaje reenviado de ${fromTel} a ${toTel} - Cliente: ${clientId}`);
 
-        return ResponseHelper.success(res, null, MESSAGES.SUCCESS.MESSAGE_FORWARDED); // Usar constante
+        return ResponseHelper.success(res, null, MESSAGES.SUCCESS.MESSAGE_FORWARDED);
     });
 
     markMessageAsImportant = asyncHandler(async (req, res) => {
@@ -90,31 +71,19 @@ class MessageController {
     });
 
     editMessage = asyncHandler(async (req, res) => {
-        // Validación personalizada para editMessage
-        const { clientId, tel, messageId, newContent, isGroup } = req.body;
-        MessageValidators.required(clientId, 'Client ID');
-        MessageValidators.phoneNumber(tel, 'Telephone number');
-        MessageValidators.required(messageId, 'Message ID');
-        MessageValidators.required(newContent, 'New content');
-        
-        const result = await this.whatsappService.editMessage(clientId, tel, messageId, newContent, isGroup);
+        const { clientId, tel, messageId, newContent, isGroup } = MessageValidators.editMessage(req.body);
+        await this.whatsappService.editMessage(clientId, tel, messageId, newContent, isGroup);
         logger.info(`Mensaje editado - ID: ${messageId} - Cliente: ${clientId}, Tel: ${tel}`);
 
-        return ResponseHelper.success(res, { result }, MESSAGES.SUCCESS.MESSAGE_EDITED); // Usar constante
+        return ResponseHelper.success(res, null, MESSAGES.SUCCESS.MESSAGE_EDITED);
     });
 
     sendMessageWithMention = asyncHandler(async (req, res) => {
-        // Validación personalizada para mentions
-        const { clientId, tel, isGroup, mentionTel, message } = req.body;
-        MessageValidators.required(clientId, 'Client ID');
-        MessageValidators.phoneNumber(tel, 'Telephone number');
-        MessageValidators.phoneNumber(mentionTel, 'Mention telephone number');
-        MessageValidators.required(message, 'Message');
-        
+        const { clientId, tel, isGroup, mentionTel, message } = MessageValidators.sendMessageWithMention(req.body);
         await this.whatsappService.sendMessageWithMention(clientId, tel, isGroup, mentionTel, message);
         logger.info('Mensaje con mención enviado correctamente');
 
-        return ResponseHelper.success(res, {}, MESSAGES.SUCCESS.MESSAGE_WITH_MENTION); // Usar constante
+        return ResponseHelper.success(res, {}, MESSAGES.SUCCESS.MESSAGE_WITH_MENTION);
     });
 
     getMessageInfo = asyncHandler(async (req, res) => {
