@@ -1,0 +1,79 @@
+D:.
+├───src
+│    ├───main.js
+│    ├───index.js
+│    ├───.wwebjs_auth/
+│    ├───config
+│    │   ├───app.js
+│    │   ├───logger.js
+│    │   └───logs/
+│    ├───controllers
+│    │   ├───chatController.js
+│    │   ├───clientController.js
+│    │   ├───contactController.js
+│    │   ├───mediaController.js
+│    │   ├───messageController.js
+│    │   ├───controllers.js
+│    │   ├───media/
+│    │   └───temp/
+│    ├───handlers
+│    │   └───websockets.js
+│    ├───lib
+│    │   └───whatsapp.js
+│    ├───middleware
+│    │   ├───rules.js
+│    │   ├───validation.js
+│    │   ├───core
+│    │   |    ├───errorHandler.js
+│    │   |    ├───security.js
+|    │   |    └───rateLimiting.js
+│    │   └───validation
+│    │        ├───validator.js
+│    │        ├───sanitizers.js
+|    │        └───middleware.js
+│    ├───routes
+│    │   ├───index.js
+│    │   ├───links.js
+│    │   ├───link.js
+│    │   └───api
+│    │        ├───chats.js
+│    │        ├───clients.js
+│    │        ├───contacts.js
+│    │        ├───media.js
+│    │        ├───messaging.js
+|    │        └───status.js
+│    ├───services
+│    │   ├───services.js
+│    │   ├───whatsappClient.js
+│    │   ├───api
+│    │   |    ├───baseService.js
+│    │   |    ├───chatService.js
+│    │   |    ├───mediaService.js
+│    │   |    ├───messageService.js
+|    │   |    └───contactService.js
+│    │   └───whatsapp
+│    │        ├───eventHandler.js
+│    │        ├───messageQueue.js
+|    │        └───sessionManager.js
+│    ├───temp
+│    └───utils
+│        ├───asyncHandler.js
+│        ├───circuitBreaker.js
+│        ├───connectionPool.js
+│        ├───constants.js
+│        ├───encryption.js
+│        ├───gracefulShutdown.js
+│        ├───healtCheck.js
+│        ├───healMonitor.js
+│        ├───messageProcessor.js
+│        ├───metricsCollector.js
+│        ├───responseHelper.js
+│        ├───retryManager.js
+│        ├───semaphore.js
+│        └───validators.js
+├───.gitignore
+├───package-lock.json
+├───package.json
+├───estructura.txt
+├───requirements.txt
+└───.env
