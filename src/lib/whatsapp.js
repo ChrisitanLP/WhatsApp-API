@@ -4,8 +4,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const { EventEmitter } = require('events');
 const qrcode = require('qrcode-terminal');
-const logger = require('../conf/logger'); 
-const config = require('../conf/config');
+const { logger } = require('../config/logger'); 
+const config = require('../config/app');
 
 
 class WhatsAppClient extends EventEmitter {
