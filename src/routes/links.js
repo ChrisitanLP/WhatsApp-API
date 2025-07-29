@@ -6,7 +6,7 @@ const { asyncHandler } = require('../utils/asyncHandler');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
-const logger = require('../conf/logger');
+const { logger } = require('../config/logger');
 
 // Configuración de seguridad
 router.use(helmet());
@@ -240,10 +240,6 @@ const routes = {
             method: 'get', 
             handler: 'getAllAuthenticatedAccountsInfo' 
         }
-    ],
-    status: [
-        { path: '/statuses/listen/:number', method: 'post', handler: 'listenToStatusUpdates' },
-        { path: '/statuses/:number', method: 'get', handler: 'getStatuses' }
     ]
 };
 
