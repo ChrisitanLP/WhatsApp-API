@@ -30,55 +30,127 @@ class MetricsCollector {
         };
         
         this.startTime = Date.now();
+
+        this.gauges = new Map();
+        this.counters = new Map();
+        this.events = [];
+        this.maxEvents = 1000;
     }
 
-    recordHttpRequest(method, path, statusCode, duration) {
-        this.metrics.http.requests++;
-        
-        if (!this.metrics.http.responses[statusCode]) {
-            this.metrics.http.responses[statusCode] = 0;
+    // Método para métricas gauge (valores que pueden subir/bajar)
+    recordGauge(name, value, labels = {}) {
+        try {
+            this.gauges.set(name, {
+                value: parseFloat(value) || 0,
+                labels,
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            console.error(`Error recording gauge ${name}:`, error);
         }
-        this.metrics.http.responses[statusCode]++;
-        
-        this.metrics.http.totalDuration += duration;
-        this.metrics.http.averageResponseTime = 
-            this.metrics.http.totalDuration / this.metrics.http.requests;
     }
 
+    recordCounter(name, value = 1, labels = {}) {
+        try {
+            const current = this.counters.get(name) || { value: 0, labels: {}, timestamp: Date.now() };
+            this.counters.set(name, {
+                value: current.value + (parseFloat(value) || 0),
+                labels: { ...current.labels, ...labels },
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            console.error(`Error recording counter ${name}:`, error);
+        }
+    }
+
+    // Métricas de HTTP requests
+    recordHttpRequest(method, path, statusCode, duration) {
+        try {
+            this.recordCounter(`http.requests.${method.toLowerCase()}`, 1, {
+                path: path.replace(/\/\d+/g, '/:id'), // Normalizar IDs
+                status: Math.floor(statusCode / 100) * 100 // 2xx, 4xx, etc.
+            });
+            
+            this.recordGauge(`http.request.duration.${method.toLowerCase()}`, duration, {
+                path: path.replace(/\/\d+/g, '/:id')
+            });
+            
+        } catch (error) {
+            console.error('Error recording HTTP request metrics:', error);
+        }
+    }
+
+    // Métricas específicas de WhatsApp
     recordWhatsAppMetrics(whatsappClient) {
         if (!whatsappClient) return;
         
-        this.metrics.whatsapp.totalClients = whatsappClient.clients?.size || 0;
-        this.metrics.whatsapp.activeClients = Array.from(whatsappClient.clients || [])
-            .filter(([number]) => whatsappClient.isReady?.(number)).length;
+        try {
+            const clientCount = whatsappClient.clients?.size || 0;
+            const readyClients = Array.from(whatsappClient.clients || [])
+                .filter(([_, client]) => whatsappClient.isReady && whatsappClient.isReady(client))
+                .length;
+            
+            this.recordGauge('whatsapp.clients.total', clientCount);
+            this.recordGauge('whatsapp.clients.ready', readyClients);
+            this.recordGauge('whatsapp.clients.ratio', 
+                clientCount > 0 ? readyClients / clientCount : 0
+            );
+            
+        } catch (error) {
+            console.error('Error recording WhatsApp metrics:', error);
+        }
     }
 
+    // Métricas específicas de WebSocket
     recordWebSocketMetrics(wss) {
         if (!wss) return;
         
-        this.metrics.websocket.connections = wss.clients?.size || 0;
+        try {
+            const activeConnections = wss.clients?.size || 0;
+            this.recordGauge('websocket.connections.active', activeConnections);
+            
+        } catch (error) {
+            console.error('Error recording WebSocket metrics:', error);
+        }
     }
 
     recordSystemMetrics() {
-        const memUsage = process.memoryUsage();
-        
-        this.metrics.system = {
-            memory: {
-                heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
-                heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
-                external: Math.round(memUsage.external / 1024 / 1024),
-                rss: Math.round(memUsage.rss / 1024 / 1024)
-            },
-            uptime: process.uptime(),
-            pid: process.pid
-        };
+        try {
+            const memUsage = process.memoryUsage();
+            const cpuUsage = process.cpuUsage();
+            
+            this.recordGauge('system.memory.heap_used', memUsage.heapUsed);
+            this.recordGauge('system.memory.heap_total', memUsage.heapTotal);
+            this.recordGauge('system.memory.external', memUsage.external);
+            this.recordGauge('system.memory.rss', memUsage.rss);
+            
+            this.recordGauge('system.cpu.user', cpuUsage.user);
+            this.recordGauge('system.cpu.system', cpuUsage.system);
+            this.recordGauge('system.uptime', process.uptime());
+            
+        } catch (error) {
+            console.error('Error recording system metrics:', error);
+        }
     }
 
-    recordEvent(eventType, data = {}) {
-        if (!this.metrics.events[eventType]) {
-            this.metrics.events[eventType] = 0;
+    // Método existente mejorado para eventos
+    recordEvent(type, data = {}) {
+        try {
+            const event = {
+                type,
+                data,
+                timestamp: Date.now()
+            };
+            
+            this.events.push(event);
+            
+            // Mantener solo los eventos más recientes
+            if (this.events.length > this.maxEvents) {
+                this.events = this.events.slice(-this.maxEvents);
+            }
+        } catch (error) {
+            console.error(`Error recording event ${type}:`, error);
         }
-        this.metrics.events[eventType]++;
     }
 
     getMetrics() {
@@ -90,6 +162,24 @@ class MetricsCollector {
                 timestamp: Date.now()
             }
         };
+    }
+
+    // Limpiar métricas antiguas
+    cleanup() {
+        const now = Date.now();
+        const maxAge = 3600000; // 1 hora
+        
+        // Limpiar gauges antiguos
+        for (const [name, metric] of this.gauges.entries()) {
+            if (now - metric.timestamp > maxAge) {
+                this.gauges.delete(name);
+            }
+        }
+        
+        // Mantener solo eventos recientes
+        this.events = this.events.filter(event => 
+            now - event.timestamp < maxAge
+        );
     }
 
     // Prometheus-style output
