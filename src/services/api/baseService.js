@@ -66,6 +66,35 @@ class BaseWhatsAppService {
             averageResponseTime: 0,
             lastOperationTime: null
         };
+
+        // Configuración de reconexión por servicio
+        this.serviceReconnectionConfig = {
+            enableProactiveMonitoring: true,
+            monitoringInterval: 15000, // 15 segundos
+            clientTimeoutThreshold: 60000, // 1 minuto sin respuesta
+            proactiveHealthChecks: true
+        };
+        
+        // Monitoring de clientes individual
+        this.clientMonitoring = new Map();
+        this.monitoringInterval = null;
+        
+        // Métricas de servicio
+        this.serviceMetrics = {
+            clientsCreated: 0,
+            clientsDestroyed: 0,
+            reconnectionsTriggered: 0,
+            healthChecksPerformed: 0,
+            lastHealthCheck: null
+        };
+        
+        // Iniciar monitoreo proactivo
+        if (this.serviceReconnectionConfig.enableProactiveMonitoring) {
+            this.startProactiveMonitoring();
+        }
+
+        this.listenersSetup = false;
+        this.healthCheckInProgress = new Set();
         
         // Configurar manejo de señales para evitar memory leaks
         this.setupGracefulShutdown();
@@ -74,27 +103,46 @@ class BaseWhatsAppService {
         this.ensureTempDirSync();
     }
 
+    startProactiveMonitoring() {
+        if (this.monitoringInterval) {
+            clearInterval(this.monitoringInterval);
+        }
+        
+        this.monitoringInterval = setInterval(() => {
+            if (!this.isShuttingDown) {
+                this.performProactiveHealthCheck();
+            }
+        }, this.serviceReconnectionConfig.monitoringInterval);
+        
+        logger.info('Proactive client monitoring started');
+    }
+
     /**
      * Configurar cierre graceful para evitar memory leaks
      */
     setupGracefulShutdown() {
-        // Solo agregar listeners una vez
-        if (!process.listenerCount('SIGINT')) {
-            process.once('SIGINT', () => this.gracefulShutdown('SIGINT'));
-        }
-        if (!process.listenerCount('SIGTERM')) {
-            process.once('SIGTERM', () => this.gracefulShutdown('SIGTERM'));
+        if (this.listenersSetup) return; // Evitar duplicados
+        
+        this.listenersSetup = true;
+        
+        // Usar once() en lugar de on() para evitar duplicados
+        process.once('SIGINT', () => this.gracefulShutdown('SIGINT'));
+        process.once('SIGTERM', () => this.gracefulShutdown('SIGTERM'));
+        process.once('SIGHUP', () => this.gracefulShutdown('SIGHUP'));
+        
+        // Manejar errores no capturados SIN duplicar
+        if (process.listenerCount('uncaughtException') === 0) {
+            process.on('uncaughtException', (error) => {
+                logger.error('Uncaught Exception:', error);
+                this.gracefulShutdown('uncaughtException');
+            });
         }
         
-        // Manejar errores no capturados
-        process.on('uncaughtException', (error) => {
-            logger.error('Uncaught Exception:', error);
-            this.gracefulShutdown('uncaughtException');
-        });
-        
-        process.on('unhandledRejection', (reason, promise) => {
-            logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-        });
+        if (process.listenerCount('unhandledRejection') === 0) {
+            process.on('unhandledRejection', (reason, promise) => {
+                logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+            });
+        }
     }
 
     /**
@@ -107,19 +155,35 @@ class BaseWhatsAppService {
         logger.info(`Received ${signal}. Starting graceful shutdown...`);
         
         try {
-            // Cerrar todos los clientes
+            // 1. Detener monitoreo proactivo PRIMERO
+            this.stopProactiveMonitoring();
+            
+            // 2. Cancelar operaciones en progreso
+            this.healthCheckInProgress.clear();
+            
+            // 3. Cerrar clientes con timeout
             if (this.whatsAppClient) {
-                await this.whatsAppClient.destroyAll();
+                const shutdownPromise = this.whatsAppClient.destroyAll();
+                const timeoutPromise = new Promise((resolve) => 
+                    setTimeout(resolve, 30000)
+                );
+                
+                await Promise.race([shutdownPromise, timeoutPromise]);
             }
             
-            // Limpiar cache
+            // 4. Limpiar estructuras de datos
             this.clientStatusCache.clear();
+            this.clientMonitoring.clear();
             
             logger.info('Graceful shutdown completed');
+            
         } catch (error) {
             logger.error('Error during graceful shutdown:', error);
         } finally {
-            process.exit(0);
+            // Solo salir si no es un test
+            if (process.env.NODE_ENV !== 'test') {
+                setTimeout(() => process.exit(0), 1000);
+            }
         }
     }
 
@@ -435,9 +499,21 @@ class BaseWhatsAppService {
                 await this.whatsAppClient.addClient(number);
             });
             
+            // Inicializar monitoreo para el nuevo cliente
+            this.clientMonitoring.set(number, {
+                lastSeen: Date.now(),
+                consecutiveFailures: 0,
+                lastHealthCheck: Date.now(),
+                createdAt: Date.now()
+            });
+            
+            // Incrementar métricas
+            this.serviceMetrics.clientsCreated++;
+            
             // Limpiar cache
             this.invalidateClientCache(number);
-            logger.info(`Client ${number} created successfully`);
+            logger.info(`Client ${number} created successfully with monitoring enabled`);
+            
         } catch (error) {
             logger.error(`Error creating client ${number}:`, error);
             throw error;
@@ -461,9 +537,16 @@ class BaseWhatsAppService {
                 await this.whatsAppClient.removeClient(number);
             });
             
+            // Limpiar monitoreo
+            this.clientMonitoring.delete(number);
+            
+            // Incrementar métricas
+            this.serviceMetrics.clientsDestroyed++;
+            
             // Limpiar todo el cache relacionado
             this.invalidateClientCache(number);
-            logger.info(`Client ${number} deleted successfully`);
+            logger.info(`Client ${number} deleted successfully with complete cleanup`);
+            
         } catch (error) {
             logger.error(`Error removing client ${number}:`, error);
             throw error;
@@ -640,23 +723,51 @@ class BaseWhatsAppService {
         const health = {
             status: 'healthy',
             timestamp: Date.now(),
-            metrics: this.getMetrics(),
+            metrics: this.getServiceMetrics(),
             issues: []
         };
         
-        // Verificar si el servicio está inicializado
+        // Verificaciones existentes...
         if (!this.initialized) {
             health.issues.push('Service not initialized');
             health.status = 'unhealthy';
         }
         
-        // Verificar si estamos cerrando
         if (this.isShuttingDown) {
             health.issues.push('Service is shutting down');
             health.status = 'unhealthy';
         }
         
-        // Verificar circuit breakers
+        // Nuevas verificaciones de monitoreo
+        const unhealthyCount = Array.from(this.clientMonitoring.values())
+            .filter(m => m.consecutiveFailures > 0).length;
+        
+        const totalMonitored = this.clientMonitoring.size;
+        
+        if (totalMonitored > 0) {
+            const unhealthyRatio = unhealthyCount / totalMonitored;
+            
+            if (unhealthyRatio > 0.5) { // Más del 50% no saludables
+                health.issues.push(`High unhealthy client ratio: ${Math.round(unhealthyRatio * 100)}%`);
+                health.status = 'degraded';
+            }
+            
+            if (unhealthyRatio > 0.8) { // Más del 80% no saludables
+                health.status = 'unhealthy';
+            }
+        }
+        
+        // Verificar si el monitoreo está funcionando
+        const timeSinceLastHealthCheck = Date.now() - (this.serviceMetrics.lastHealthCheck || 0);
+        const expectedInterval = this.serviceReconnectionConfig.monitoringInterval * 2; // Allow 2x interval
+        
+        if (this.serviceReconnectionConfig.enableProactiveMonitoring && 
+            timeSinceLastHealthCheck > expectedInterval) {
+            health.issues.push('Proactive monitoring appears stalled');
+            health.status = health.status === 'healthy' ? 'degraded' : health.status;
+        }
+        
+        // Verificar circuit breakers existentes...
         Object.entries(this.circuitBreakers).forEach(([name, cb]) => {
             const state = cb.getState();
             if (state.state === 'OPEN') {
@@ -665,11 +776,11 @@ class BaseWhatsAppService {
             }
         });
         
-        // Verificar si hay demasiadas operaciones fallidas
+        // Verificar tasa de fallos existente...
         const failureRate = this.operationMetrics.failedOperations / 
-                           Math.max(this.operationMetrics.totalOperations, 1);
+                        Math.max(this.operationMetrics.totalOperations, 1);
         
-        if (failureRate > 0.3) { // Reducido de 0.5 a 0.3
+        if (failureRate > 0.3) {
             health.issues.push(`High failure rate: ${(failureRate * 100).toFixed(2)}%`);
             health.status = health.status === 'healthy' ? 'degraded' : health.status;
         }
@@ -732,6 +843,288 @@ class BaseWhatsAppService {
         } catch (error) {
             logger.error('Error creating temp directory:', error);
             throw error;
+        }
+    }
+
+    async performProactiveHealthCheck() {
+        if (this.isShuttingDown || !this.initialized) return;
+        
+        try {
+            this.serviceMetrics.healthChecksPerformed++;
+            this.serviceMetrics.lastHealthCheck = Date.now();
+            
+            // Obtener números de clientes de forma segura
+            const clientNumbers = Array.from(this.whatsAppClient?.clients?.keys() || []);
+            
+            if (clientNumbers.length === 0) {
+                logger.debug('No clients to health check');
+                return;
+            }
+            
+            logger.debug(`Performing health check on ${clientNumbers.length} clients`);
+            
+            // MODIFICADO: Procesar clientes en lotes para evitar sobrecarga
+            const batchSize = 3;
+            for (let i = 0; i < clientNumbers.length; i += batchSize) {
+                const batch = clientNumbers.slice(i, i + batchSize);
+                
+                // Procesar lote en paralelo con timeout global
+                const batchPromises = batch.map(number => 
+                    Promise.race([
+                        this.checkAndMaintainClient(number),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error(`Health check timeout for ${number}`)), 15000)
+                        )
+                    ]).catch(error => {
+                        logger.error(`Health check error for ${number}:`, error.message);
+                    })
+                );
+                
+                await Promise.allSettled(batchPromises);
+                
+                // Pequeña pausa entre lotes
+                if (i + batchSize < clientNumbers.length) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+            
+            // Limpiar entradas obsoletas
+            this.cleanupStaleMonitoring();
+            
+        } catch (error) {
+            logger.error('Proactive health check failed:', error);
+        }
+    }
+
+    async checkAndMaintainClient(number) {
+        // NUEVO: Prevenir health checks simultáneos del mismo cliente
+        if (this.healthCheckInProgress.has(number)) {
+            logger.debug(`Health check already in progress for ${number}`);
+            return;
+        }
+
+        this.healthCheckInProgress.add(number);
+        
+        try {
+            const client = this.whatsAppClient.getClient(number);
+            if (!client) {
+                logger.debug(`Client ${number} not found during health check`);
+                return;
+            }
+            
+            const monitoring = this.clientMonitoring.get(number) || {
+                lastSeen: Date.now(),
+                consecutiveFailures: 0,
+                lastHealthCheck: 0,
+                lastReconnectionAttempt: 0 // NUEVO: Prevenir reconexiones muy frecuentes
+            };
+            
+            // NUEVO: Prevenir reconexiones muy frecuentes (mínimo 2 minutos)
+            const timeSinceLastReconnection = Date.now() - (monitoring.lastReconnectionAttempt || 0);
+            const minReconnectionInterval = 120000; // 2 minutos
+            
+            const isHealthy = await this.performClientHealthCheck(client);
+            
+            if (isHealthy) {
+                // Cliente sano - resetear contadores
+                monitoring.lastSeen = Date.now();
+                monitoring.consecutiveFailures = 0;
+                monitoring.lastHealthCheck = Date.now();
+                
+                logger.debug(`Client ${number} health check passed`);
+            } else {
+                // Cliente no está sano
+                monitoring.consecutiveFailures++;
+                monitoring.lastHealthCheck = Date.now();
+                
+                logger.warn(`Client ${number} failed health check (${monitoring.consecutiveFailures} consecutive failures)`);
+                
+                // MODIFICADO: Reconectar solo después de 3 fallos Y respetando intervalo mínimo
+                if (monitoring.consecutiveFailures >= 3 && 
+                    timeSinceLastReconnection > minReconnectionInterval &&
+                    !this.whatsAppClient.activeReconnections?.has(number)) {
+                    
+                    logger.info(`Triggering proactive reconnection for ${number} after ${monitoring.consecutiveFailures} failures`);
+                    monitoring.lastReconnectionAttempt = Date.now();
+                    this.serviceMetrics.reconnectionsTriggered++;
+                    
+                    // Usar setTimeout para evitar bloquear el health check loop
+                    setImmediate(() => {
+                        this.whatsAppClient.handleReconnection(number, 'proactive_health_check');
+                    });
+                    
+                    // Reset para evitar múltiples triggers
+                    monitoring.consecutiveFailures = 0;
+                }
+            }
+            
+            this.clientMonitoring.set(number, monitoring);
+            
+        } catch (error) {
+            logger.error(`Error in checkAndMaintainClient for ${number}:`, error);
+            
+            const monitoring = this.clientMonitoring.get(number) || { consecutiveFailures: 0 };
+            monitoring.consecutiveFailures++;
+            monitoring.lastHealthCheck = Date.now();
+            this.clientMonitoring.set(number, monitoring);
+            
+        } finally {
+            // IMPORTANTE: Siempre remover de la lista de progreso
+            this.healthCheckInProgress.delete(number);
+        }
+    }
+
+    async performClientHealthCheck(client) {
+        try {
+            // 1. Verificar que el cliente existe y tiene propiedades básicas
+            if (!client || typeof client !== 'object') {
+                return false;
+            }
+
+            // 2. Verificar estado básico con timeout corto
+            const state = await Promise.race([
+                client.getState(),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('State check timeout')), 3000)
+                )
+            ]);
+            
+            if (state !== 'CONNECTED') {
+                logger.debug(`Client state is ${state}, not CONNECTED`);
+                return false;
+            }
+
+            // 3. CORREGIDO: Usar método existente en lugar de getWWebJSInfo
+            try {
+                const info = await Promise.race([
+                    client.info || Promise.resolve(null),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Info check timeout')), 2000)
+                    )
+                ]);
+                
+                // Verificar que tenemos información básica del cliente
+                if (!info || !info.wid) {
+                    logger.debug('Client info not available or incomplete');
+                    return false;
+                }
+            } catch (infoError) {
+                logger.debug('Client info check failed, but continuing...');
+                // No fallar por esto, continuar con otras verificaciones
+            }
+
+            // 4. CORREGIDO: Test de funcionalidad básica con timeout muy corto
+            try {
+                const chats = await Promise.race([
+                    client.getChats().then(chats => chats.slice(0, 1)),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Chats check timeout')), 3000)
+                    )
+                ]);
+                
+                // Si llegamos aquí, el cliente está funcionando
+                return true;
+                
+            } catch (chatsError) {
+                logger.debug(`Chats check failed: ${chatsError.message}`);
+                return false;
+            }
+            
+        } catch (error) {
+            logger.debug(`Health check failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    cleanupStaleMonitoring() {
+        const now = Date.now();
+        const staleThreshold = 600000; // 10 minutos
+        
+        for (const [number, monitoring] of this.clientMonitoring.entries()) {
+            // Remover si el cliente ya no existe Y ha pasado suficiente tiempo
+            if (!this.whatsAppClient?.clients?.has(number)) {
+                const timeSinceLastSeen = now - (monitoring.lastSeen || monitoring.lastHealthCheck || 0);
+                
+                if (timeSinceLastSeen > staleThreshold) {
+                    this.clientMonitoring.delete(number);
+                    logger.debug(`Cleaned up stale monitoring for ${number}`);
+                }
+            }
+        }
+        
+        // NUEVO: Limpiar health checks en progreso huérfanos
+        for (const number of this.healthCheckInProgress) {
+            if (!this.whatsAppClient?.clients?.has(number)) {
+                this.healthCheckInProgress.delete(number);
+                logger.debug(`Cleaned up orphaned health check progress for ${number}`);
+            }
+        }
+    }
+
+    stopProactiveMonitoring() {
+        if (this.monitoringInterval) {
+            clearInterval(this.monitoringInterval);
+            this.monitoringInterval = null;
+            logger.info('Proactive monitoring stopped');
+        }
+        
+        // Limpiar health checks en progreso
+        this.healthCheckInProgress.clear();
+    }
+
+    getServiceMetrics() {
+        const baseMetrics = this.getMetrics();
+        
+        return {
+            ...baseMetrics,
+            service: {
+                ...this.serviceMetrics,
+                monitoredClients: this.clientMonitoring.size,
+                proactiveMonitoringEnabled: this.serviceReconnectionConfig.enableProactiveMonitoring,
+                monitoringInterval: this.serviceReconnectionConfig.monitoringInterval
+            },
+            monitoring: {
+                totalClients: this.clientMonitoring.size,
+                healthyClients: Array.from(this.clientMonitoring.values())
+                    .filter(m => m.consecutiveFailures === 0).length,
+                unhealthyClients: Array.from(this.clientMonitoring.values())
+                    .filter(m => m.consecutiveFailures > 0).length,
+                averageUptime: this.calculateAverageUptime()
+            }
+        };
+    }
+
+    calculateAverageUptime() {
+        if (this.clientMonitoring.size === 0) return 0;
+        
+        const now = Date.now();
+        let totalUptime = 0;
+        
+        for (const monitoring of this.clientMonitoring.values()) {
+            if (monitoring.createdAt) {
+                totalUptime += now - monitoring.createdAt;
+            }
+        }
+        
+        return Math.round(totalUptime / this.clientMonitoring.size);
+    }
+
+    async forceHealthCheck(number = null) {
+        if (number) {
+            // Health check para un cliente específico
+            if (this.whatsAppClient.clients.has(number)) {
+                await this.checkAndMaintainClient(number);
+                return this.clientMonitoring.get(number);
+            } else {
+                throw new Error(`Client ${number} not found`);
+            }
+        } else {
+            // Health check para todos los clientes
+            await this.performProactiveHealthCheck();
+            return Array.from(this.clientMonitoring.entries()).map(([num, monitoring]) => ({
+                number: num,
+                ...monitoring
+            }));
         }
     }
 }
