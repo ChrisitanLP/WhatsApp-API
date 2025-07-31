@@ -5,7 +5,11 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/main.js",
-    "ngrok": "ngrok http 3000"
+    "ngrok": "ngrok http 3000",
+    "start": "node src/main.js",
+    "debug": "nodemon --inspect=0.0.0.0:9229 src/main.js",
+    "production": "NODE_ENV=production node src/main.js",
+    "cluster": "NODE_ENV=production MAX_WORKERS=4 node src/main.js"
   },
   "keywords": [],
   "author": "",
@@ -22,6 +26,7 @@
     "helmet": "^8.1.0",
     "http-proxy-middleware": "^3.0.0",
     "ioredis": "^5.6.1",
+    "js-yaml": "^4.1.0",
     "mensajes": "file:",
     "mime": "^4.0.4",
     "node-fetch": "^3.3.2",
@@ -29,9 +34,15 @@
     "qrcode-terminal": "^0.12.0",
     "rate-limit-redis": "^4.2.1",
     "redis": "^5.6.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0",
     "util": "^0.12.5",
     "whatsapp-web.js": "^1.26.1-alpha.3",
     "winston": "^3.17.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/swagger-jsdoc": "^6.0.1",
+    "@types/swagger-ui-express": "^4.1.4"
   }
 }

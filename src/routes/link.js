@@ -104,9 +104,17 @@ const createRateLimit = (windowMs, max, message) => rateLimit({
 const createSlowDown = (windowMs, delayAfter, delayMs) => slowDown({
     windowMs,
     delayAfter,
-    delayMs,
-    maxDelayMs: delayMs * 10
+    delayMs: () => delayMs, // Nueva sintaxis para v2
+    maxDelayMs: delayMs * 10,
+    validate: { delayMs: false } // Deshabilita el warning
 });
+
+const slowDownConfigs = {
+    light: createSlowDown(60000, 5, 200),    // Para operaciones ligeras
+    medium: createSlowDown(60000, 10, 500),   // Para operaciones medianas
+    heavy: createSlowDown(60000, 3, 1000),    // Para operaciones pesadas
+    file: createSlowDown(60000, 2, 2000)      // Para archivos/media
+};
 
 // Route definitions with their respective controllers
 const routeGroups = {
@@ -114,7 +122,7 @@ const routeGroups = {
         controller: clientController,
         middleware: [
             createRateLimit(60000, 10, 'Too many client operations'),
-            createSlowDown(60000, 5, 500)
+            slowDownConfigs.medium
         ],
         routes: [
             { 
@@ -165,7 +173,7 @@ const routeGroups = {
         controller: messageController,
         middleware: [
             createRateLimit(60000, 50, 'Too many message operations'),
-            createSlowDown(60000, 20, 200)
+            slowDownConfigs.light
         ],
         routes: [
             { 
@@ -236,7 +244,7 @@ const routeGroups = {
         controller: mediaController,
         middleware: [
             createRateLimit(60000, 20, 'Too many media operations'),
-            createSlowDown(60000, 10, 1000)
+            slowDownConfigs.heavy
         ],
         routes: [
             { 
@@ -275,7 +283,7 @@ const routeGroups = {
         controller: chatController,
         middleware: [
             createRateLimit(60000, 40, 'Too many chat operations'),
-            createSlowDown(60000, 20, 300)
+            slowDownConfigs.light
         ],
         routes: [
             { 
@@ -338,7 +346,7 @@ const routeGroups = {
         controller: contactController,
         middleware: [
             createRateLimit(60000, 30, 'Too many contact operations'),
-            createSlowDown(60000, 15, 200)
+            slowDownConfigs.light
         ],
         routes: [
             { 
@@ -462,3 +470,4 @@ router.get('/health', (req, res) => {
 });
 
 module.exports = router;
+module.exports.routeGroups = routeGroups;

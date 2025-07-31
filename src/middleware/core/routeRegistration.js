@@ -10,10 +10,21 @@ const { logger } = require('../../config/logger');
 const registerRoutes = (router, routeGroups, middleware) => {
     const { ValidationMiddleware, asyncHandler } = middleware;
 
-    Object.entries(routeGroups).forEach(([groupName, { controller, routes }]) => {
-        logger.info(`Registering route group: ${groupName}`);
+    Object.entries(routeGroups).forEach(([groupName, { controller, routes, middleware: groupMiddleware = [] }]) => {
+        logger.info(`Registering route group: ${groupName} with ${routes.length} routes`);
 
-        routes.forEach(({ path, method, handler, rateLimit: routeLimit, validation }) => {
+        // Aplicar middleware de grupo si existe
+        if (groupMiddleware.length > 0) {
+            routes.forEach(route => {
+                groupMiddleware.forEach(mw => {
+                    if (typeof mw === 'function') {
+                        router.use(route.path, mw);
+                    }
+                });
+            });
+        }
+
+        routes.forEach(({ path, method, handler, rateLimit: routeLimit, validation, timeout }) => {
             try {
                 // Verificar que el handler existe en el controlador
                 if (typeof controller[handler] !== "function") {
@@ -24,27 +35,54 @@ const registerRoutes = (router, routeGroups, middleware) => {
                 // Construir middlewares
                 const middlewares = [];
 
-                // Agregar validación si está configurada
+                // Agregar rate limiter específico si está configurado
+                if (routeLimit) {
+                    middlewares.push(routeLimit);
+                }
+
+                // Agregar timeout middleware si está configurado
+                if (timeout) {
+                    middlewares.push((req, res, next) => {
+                        req.setTimeout(timeout, () => {
+                            if (!res.headersSent) {
+                                logger.error(`Request timeout: ${req.method} ${req.path}`, {
+                                    requestId: req.requestId,
+                                    timeout
+                                });
+                                res.status(408).json({
+                                    success: false,
+                                    message: 'Request timeout',
+                                    requestId: req.requestId
+                                });
+                            }
+                        });
+                        next();
+                    });
+                }
+
+                // Agregar validación si está configurada y disponible
                 if (validation !== false) {
                     const validationRules = getValidationRules(groupName, handler);
-                    if (validationRules) {
-                        middlewares.push(ValidationMiddleware.validate(validationRules));
+                    if (validationRules && ValidationMiddleware) {
+                        middlewares.push(ValidationMiddleware.validate ? 
+                            ValidationMiddleware.validate(validationRules) : 
+                            ValidationMiddleware[handler]
+                        );
                     }
                 }
 
-                // Agregar rate limiter específico si está configurado
-                if (routeLimit) {
-                    middlewares.push(createRouteLimiter(routeLimit));
-                }
-
-                // Registrar la ruta
+                // Registrar la ruta con asyncHandler
                 router[method.toLowerCase()](
                     path,
                     ...middlewares,
                     asyncHandler(controller[handler])
                 );
 
-                logger.debug(`Route registered: ${method.toUpperCase()} ${path} -> ${groupName}.${handler}`);
+                logger.debug(`Route registered: ${method.toUpperCase()} ${path} -> ${groupName}.${handler}`, {
+                    hasTimeout: !!timeout,
+                    hasRateLimit: !!routeLimit,
+                    hasValidation: validation !== false
+                });
 
             } catch (error) {
                 logger.error(`Error registering route ${method} ${path}:`, error);

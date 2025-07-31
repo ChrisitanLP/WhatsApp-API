@@ -64,6 +64,28 @@ class WhatsAppServer {
             '/login': '../static/inicioSesion.html',
             '/home': '../static/chat.html'
         };
+
+        // Nuevas propiedades para reconexión avanzada
+        this.reconnectionConfig = {
+            enableAutoReconnection: config.enableAutoReconnection !== false,
+            maxConcurrentReconnections: config.maxConcurrentReconnections || 3,
+            reconnectionMetricsInterval: 60000, // 1 minuto
+            alertThresholds: {
+                failureRate: 0.5, // 50% de fallos
+                reconnectionTime: 300000, // 5 minutos
+                queueSize: 10
+            }
+        };
+        
+        // Alertas y notificaciones
+        this.alertManager = {
+            lastAlert: new Map(),
+            cooldownPeriod: 300000, // 5 minutos entre alertas del mismo tipo
+            activeAlerts: new Set()
+        };
+
+        this.listenersSetup = false;
+        this.shutdownInProgress = false;
     }
 
     async initialize() {
@@ -233,25 +255,47 @@ class WhatsAppServer {
     }
 
     setupMetrics() {
-        // Métricas de sistema cada 30 segundos
+    // Existing metrics interval...
         this.metricsInterval = setInterval(() => {
             try {
                 this.metrics.recordSystemMetrics();
                 this.metrics.recordWhatsAppMetrics(this.whatsappClient);
                 this.metrics.recordWebSocketMetrics(this.wss);
+                
+                // New: Record reconnection metrics
+                this.recordReconnectionMetrics();
+                
             } catch (error) {
-                logger.error('Error recording metrics:', error);
+                logger.error('Error recording enhanced metrics:', error);
             }
         }, 30000);
-
-        // Endpoint para métricas
-        this.app.get('/metrics', (req, res) => {
+        
+        // Separate interval for reconnection metrics analysis
+        this.reconnectionMetricsInterval = setInterval(() => {
+            this.analyzeReconnectionTrends();
+        }, this.reconnectionConfig.reconnectionMetricsInterval);
+        
+        // Enhanced metrics endpoint
+        this.app.get('/metrics/detailed', (req, res) => {
             try {
-                const metrics = this.getMetrics();
+                const metrics = this.getDetailedMetrics();
                 res.json(metrics);
             } catch (error) {
                 res.status(500).json({
-                    error: 'Failed to get metrics',
+                    error: 'Failed to get detailed metrics',
+                    message: error.message
+                });
+            }
+        });
+        
+        // Reconnection-specific metrics endpoint
+        this.app.get('/metrics/reconnection', (req, res) => {
+            try {
+                const metrics = this.whatsappClient.getReconnectionMetrics();
+                res.json(metrics);
+            } catch (error) {
+                res.status(500).json({
+                    error: 'Failed to get reconnection metrics',
                     message: error.message
                 });
             }
@@ -388,7 +432,11 @@ class WhatsAppServer {
             'ready': this.handleReady.bind(this),
             'message': this.handleMessage.bind(this),
             'disconnected': this.handleDisconnected.bind(this),
-            'qrUpdated': this.handleQrUpdate.bind(this)
+            'qrUpdated': this.handleQrUpdate.bind(this),
+
+            'reconnected': this.handleReconnected.bind(this),
+            'reconnection_failed': this.handleReconnectionFailed.bind(this),
+            'health_check': this.handleHealthCheck.bind(this)
         };
 
         Object.entries(events).forEach(([event, handler]) => {
@@ -397,49 +445,27 @@ class WhatsAppServer {
     }
 
     setupGracefulShutdown() {
+        // Evitar configurar listeners múltiples veces
+        if (this.listenersSetup) {
+            logger.debug('Graceful shutdown already configured');
+            return;
+        }
+        
+        this.listenersSetup = true;
+        
+        // CORREGIDO: Usar once() para evitar múltiples listeners
         this.gracefulShutdown.onShutdown(async (signal) => {
+            if (this.shutdownInProgress) {
+                logger.warn(`Shutdown already in progress, ignoring ${signal}`);
+                return;
+            }
+            
+            this.shutdownInProgress = true;
             logger.info(`Received ${signal}, initiating graceful shutdown...`);
-            this.isShuttingDown = true;
-
-            // Limpiar intervalos
-            if (this.metricsInterval) {
-                clearInterval(this.metricsInterval);
-            }
-
-            // Dejar de aceptar nuevas conexiones
-            if (this.server) {
-                this.server.close(() => {
-                    logger.info('HTTP server closed');
-                });
-            }
-
-            // Cerrar conexiones WebSocket gradualmente
-            if (this.wss) {
-                this.wss.clients.forEach(ws => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.close(1001, 'Server shutting down');
-                    }
-                });
-                
-                this.wss.close(() => {
-                    logger.info('WebSocket server closed');
-                });
-            }
-
-            // Cleanup WhatsApp clients
-            if (this.whatsappClient) {
-                try {
-                    await this.whatsappClient.cleanup();
-                } catch (error) {
-                    logger.error('Error during WhatsApp cleanup:', error);
-                }
-            }
-
-            logger.info('Graceful shutdown completed');
-            setTimeout(() => {
-                process.exit(0);
-            }, 1000);
+            await this.cleanup();
         });
+        
+        logger.info('Graceful shutdown handlers configured');
     }
 
     broadcastToWebSocketClients(eventType, data) {
@@ -548,63 +574,475 @@ class WhatsAppServer {
                 throw new Error('Server initialization failed');
             }
 
+            // NUEVO: Verificar listeners antes de iniciar
+            this.checkAndCleanupListeners();
+
             this.server.listen(this.port, '0.0.0.0', () => {
                 logger.info(`Server running on port: ${this.port}`);
                 logger.info(`Worker ${process.pid} started`);
                 logger.info(`Server URL: http://localhost:${this.port}`);
+                
+                // Log información adicional en desarrollo
+                if (process.env.NODE_ENV === 'development') {
+                    this.checkAndCleanupListeners();
+                }
             });
 
             this.server.on('error', (error) => {
                 logger.error('Server error:', error);
+                
                 if (error.code === 'EADDRINUSE') {
                     logger.error(`Port ${this.port} is already in use`);
+                } else if (error.code === 'EACCES') {
+                    logger.error(`Permission denied to bind to port ${this.port}`);
                 }
-                if (!this.isShuttingDown) {
-                    this.gracefulShutdown.shutdown('SIGTERM');
+                
+                if (!this.isShuttingDown && !this.shutdownInProgress) {
+                    setTimeout(() => {
+                        this.cleanup();
+                    }, 1000);
                 }
             });
 
         } catch (error) {
             logger.error('Failed to start server:', error);
+            
+            // Cleanup antes de salir
+            try {
+                await this.cleanup();
+            } catch (cleanupError) {
+                logger.error('Cleanup failed during startup error:', cleanupError);
+            }
+            
             process.exit(1);
         }
     }
 
     async cleanup() {
-        logger.info('Server shutting down...');
+        if (this.shutdownInProgress) {
+            logger.warn('Cleanup already in progress');
+            return;
+        }
+        
+        logger.info('Server shutting down with enhanced cleanup...');
         this.isShuttingDown = true;
+        this.shutdownInProgress = true;
         
         try {
-            // Limpiar intervalos
-            if (this.metricsInterval) {
-                clearInterval(this.metricsInterval);
-            }
+            // 1. Detener intervalos PRIMERO
+            const intervals = [
+                'metricsInterval',
+                'reconnectionMetricsInterval',
+                'lastMetricsLog',
+                'lastHealthLog'
+            ];
+            
+            intervals.forEach(intervalName => {
+                if (this[intervalName]) {
+                    clearInterval(this[intervalName]);
+                    this[intervalName] = null;
+                    logger.debug(`Cleared ${intervalName}`);
+                }
+            });
 
-            // Close WebSocket server
-            if (this.wss) {
-                this.wss.close(() => {
-                    logger.info('WebSocket server closed');
-                });
-            }
-
-            // Close HTTP server
+            // 2. Cerrar servidor HTTP con timeout
             if (this.server) {
-                this.server.close(() => {
-                    logger.info('HTTP server closed');
+                await new Promise((resolve) => {
+                    const timeout = setTimeout(resolve, 5000);
+                    
+                    this.server.close(() => {
+                        clearTimeout(timeout);
+                        logger.info('HTTP server closed');
+                        resolve();
+                    });
                 });
             }
 
-            // Cleanup WhatsApp client
-            if (this.whatsappClient) {
-                await this.whatsappClient.cleanup();
+            // 3. Cerrar conexiones WebSocket gradualmente
+            if (this.wss && this.wss.clients) {
+                logger.info(`Closing ${this.wss.clients.size} WebSocket connections`);
+                
+                const closePromises = Array.from(this.wss.clients).map(ws => {
+                    return new Promise((resolve) => {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.close(1001, 'Server shutting down');
+                        }
+                        resolve();
+                    });
+                });
+                
+                await Promise.race([
+                    Promise.allSettled(closePromises),
+                    new Promise(resolve => setTimeout(resolve, 8000))
+                ]);
+                
+                // Cerrar servidor WebSocket
+                await new Promise((resolve) => {
+                    const timeout = setTimeout(resolve, 3000);
+                    
+                    this.wss.close(() => {
+                        clearTimeout(timeout);
+                        logger.info('WebSocket server closed');
+                        resolve();
+                    });
+                });
             }
+
+            // 4. CORREGIDO: Cleanup de WhatsApp clients con cancelación de reconexiones
+            if (this.whatsappClient) {
+                try {
+                    // Cancelar reconexiones activas PRIMERO
+                    if (typeof this.whatsappClient.cancelAllReconnections === 'function') {
+                        await this.whatsappClient.cancelAllReconnections();
+                        logger.info('All reconnections cancelled');
+                    }
+                    
+                    // Destruir todos los clientes
+                    await Promise.race([
+                        this.whatsappClient.destroyAll(),
+                        new Promise(resolve => setTimeout(resolve, 25000)) // 25 segundos timeout
+                    ]);
+                    
+                    logger.info('WhatsApp clients cleanup completed');
+                } catch (error) {
+                    logger.error('Error during WhatsApp cleanup:', error);
+                }
+            }
+            
+            // 5. Limpiar estructuras de datos del servidor
+            if (this.alertManager) {
+                this.alertManager.activeAlerts.clear();
+                this.alertManager.lastAlert.clear();
+            }
+            
+            if (this.wsConnectionPool) {
+                this.wsConnectionPool.clear();
+            }
+            
+            logger.info('Enhanced server cleanup completed');
+            
         } catch (error) {
-            logger.error('Error during cleanup:', error);
+            logger.error('Error during enhanced cleanup:', error);
         }
 
-        setTimeout(() => {
-            process.exit(0);
-        }, 2000);
+        // 6. Finalizar proceso con timeout
+        if (process.env.NODE_ENV !== 'test') {
+            setTimeout(() => {
+                logger.info('Forcing process exit');
+                process.exit(0);
+            }, 2000);
+        }
+    }
+
+    handleReconnected(data) {
+        const { number, attempts, duration } = data;
+        logger.info(`Client ${number} reconnected after ${attempts} attempts in ${duration}ms`);
+        
+        // Broadcast to WebSocket clients
+        this.broadcastToWebSocketClients('reconnected', {
+            number,
+            attempts,
+            duration,
+            timestamp: Date.now()
+        });
+        
+        // Clear any related alerts
+        this.clearAlert(`reconnection_failed_${number}`);
+        
+        // Record success metric
+        this.metrics.recordEvent('client_reconnected', { 
+            number, 
+            attempts, 
+            duration,
+            success: true 
+        });
+    }
+
+    handleReconnectionFailed(data) {
+        const { number, error } = data;
+        logger.error(`Final reconnection failure for ${number}: ${error}`);
+        
+        // Broadcast to WebSocket clients
+        this.broadcastToWebSocketClients('reconnection_failed', {
+            number,
+            error,
+            timestamp: Date.now()
+        });
+        
+        // Trigger alert if not in cooldown
+        this.triggerAlert('reconnection_failed', {
+            type: 'client_reconnection_failed',
+            number,
+            error,
+            severity: 'high'
+        });
+        
+        // Record failure metric
+        this.metrics.recordEvent('client_reconnection_failed', { 
+            number, 
+            error,
+            success: false 
+        });
+    }
+
+    handleHealthCheck(data) {
+        const { total, healthy, reconnecting, queued, timestamp } = data;
+        
+        // MODIFICADO: Log health solo si hay cambios significativos o cada 10 minutos
+        const shouldLog = !this.lastHealthLog || 
+                         (timestamp - this.lastHealthLog) > 600000 || // 10 minutos
+                         Math.abs((this.lastHealthRatio || 1) - (healthy / Math.max(total, 1))) > 0.2; // Cambio >20%
+        
+        if (shouldLog) {
+            logger.info(`Health Check - Total: ${total}, Healthy: ${healthy}, Reconnecting: ${reconnecting}, Queued: ${queued}`);
+            this.lastHealthLog = timestamp;
+            this.lastHealthRatio = healthy / Math.max(total, 1);
+        }
+        
+        // MODIFICADO: Umbrales más conservadores para alertas
+        const healthRatio = total > 0 ? healthy / total : 1;
+        
+        // Solo alertar si hay problemas significativos y múltiples clientes
+        if (healthRatio < 0.5 && total > 3) { // Menos del 50% saludable con 4+ clientes
+            this.triggerAlert('poor_health', {
+                type: 'poor_client_health',
+                healthRatio: Math.round(healthRatio * 100),
+                total,
+                healthy,
+                severity: 'medium'
+            });
+        }
+        
+        // MODIFICADO: Umbral más alto para cola de reconexión
+        if (queued > this.reconnectionConfig.alertThresholds.queueSize * 2) {
+            this.triggerAlert('high_queue', {
+                type: 'high_reconnection_queue',
+                queueSize: queued,
+                severity: 'medium'
+            });
+        }
+    }
+
+    triggerAlert(alertKey, alertData) {
+        if (this.isShuttingDown) return;
+        
+        const now = Date.now();
+        const lastAlert = this.alertManager.lastAlert.get(alertKey);
+        
+        // MODIFICADO: Cooldown más largo para evitar spam
+        const cooldownPeriod = 600000; // 10 minutos
+        
+        if (lastAlert && (now - lastAlert) < cooldownPeriod) {
+            logger.debug(`Alert ${alertKey} in cooldown, skipping`);
+            return;
+        }
+        
+        this.alertManager.lastAlert.set(alertKey, now);
+        this.alertManager.activeAlerts.add(alertKey);
+        
+        logger.warn(`ALERT [${alertData.severity.toUpperCase()}]: ${alertData.type}`, {
+            ...alertData,
+            alertKey,
+            timestamp: now
+        });
+        
+        // Broadcast solo alertas de alta severidad para evitar spam en WebSocket
+        if (alertData.severity === 'high') {
+            this.broadcastToWebSocketClients('system_alert', {
+                ...alertData,
+                alertKey,
+                timestamp: now
+            });
+        }
+    }
+
+    clearAlert(alertKey) {
+        if (this.alertManager.activeAlerts.has(alertKey)) {
+            this.alertManager.activeAlerts.delete(alertKey);
+            logger.info(`Alert cleared: ${alertKey}`);
+        }
+    }
+
+    checkAndCleanupListeners() {
+        const events = ['SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException', 'unhandledRejection'];
+        
+        events.forEach(event => {
+            const listenerCount = process.listenerCount(event);
+            if (listenerCount > 2) { // Más de 2 listeners es sospechoso
+                logger.warn(`Too many listeners for ${event}: ${listenerCount}`);
+                
+                // En desarrollo, mostrar información adicional
+                if (process.env.NODE_ENV === 'development') {
+                    console.log(`${event} listeners:`, process.listeners(event).length);
+                }
+            }
+        });
+    }
+
+    analyzeReconnectionTrends() {
+        try {
+            const metrics = this.whatsappClient?.getReconnectionMetrics?.();
+            
+            if (!metrics || !metrics.totalAttempts) {
+                return; // No hay datos suficientes
+            }
+            
+            // MODIFICADO: Solo alertar si hay suficiente actividad
+            if (metrics.totalAttempts < 5) {
+                return; // Muy pocos intentos para análisis
+            }
+            
+            // MODIFICADO: Umbrales más permisivos
+            const failureRateThreshold = 70; // 70% en lugar de 50%
+            const reconnectionTimeThreshold = 600000; // 10 minutos en lugar de 5
+            
+            // Check failure rate solo si hay suficientes intentos
+            if (metrics.totalAttempts >= 10 && 
+                metrics.successRate < (100 - failureRateThreshold)) {
+                
+                this.triggerAlert('high_failure_rate', {
+                    type: 'high_reconnection_failure_rate',
+                    successRate: metrics.successRate.toFixed(2),
+                    totalAttempts: metrics.totalAttempts,
+                    severity: 'high'
+                });
+            }
+            
+            // Check average reconnection time
+            if (metrics.averageReconnectionTime > reconnectionTimeThreshold) {
+                this.triggerAlert('slow_reconnections', {
+                    type: 'slow_reconnection_times',
+                    averageTime: Math.round(metrics.averageReconnectionTime / 1000),
+                    severity: 'medium'
+                });
+            }
+            
+            logger.debug('Reconnection trend analysis completed', {
+                totalAttempts: metrics.totalAttempts,
+                successRate: metrics.successRate.toFixed(2),
+                averageTime: Math.round(metrics.averageReconnectionTime),
+                activeReconnections: metrics.activeReconnections,
+                queuedReconnections: metrics.queuedReconnections
+            });
+            
+        } catch (error) {
+            logger.error('Error analyzing reconnection trends:', error);
+        }
+    }
+
+    getDetailedMetrics() {
+        const baseMetrics = this.getMetrics();
+        const reconnectionMetrics = this.whatsappClient.getReconnectionMetrics();
+        
+        return {
+            ...baseMetrics,
+            reconnection: reconnectionMetrics,
+            alerts: {
+                active: Array.from(this.alertManager.activeAlerts),
+                lastAlerts: Object.fromEntries(this.alertManager.lastAlert)
+            },
+            system: {
+                uptime: process.uptime(),
+                memoryUsage: process.memoryUsage(),
+                cpuUsage: process.cpuUsage(),
+                nodeVersion: process.version,
+                platform: process.platform
+            },
+            config: {
+                maxConcurrentReconnections: this.reconnectionConfig.maxConcurrentReconnections,
+                autoReconnectionEnabled: this.reconnectionConfig.enableAutoReconnection,
+                maxWsConnections: this.maxWsConnections
+            }
+        };
+    }
+
+    recordReconnectionMetrics() {
+        if (!this.whatsappClient) return;
+        
+        try {
+            const metrics = this.whatsappClient.getReconnectionMetrics();
+            
+            // Usar métodos existentes en lugar de los faltantes
+            // Asumiendo que MetricsCollector tiene métodos como recordEvent o recordMetric
+            
+            // En lugar de recordGauge, usar recordEvent con los valores
+            this.metrics.recordEvent('reconnection_active_count', { 
+                value: metrics.activeReconnections 
+            });
+            
+            this.metrics.recordEvent('reconnection_queued_count', { 
+                value: metrics.queuedReconnections 
+            });
+            
+            this.metrics.recordEvent('reconnection_success_rate', { 
+                value: metrics.successRate 
+            });
+            
+            this.metrics.recordEvent('reconnection_average_time', { 
+                value: metrics.averageReconnectionTime 
+            });
+            
+            // Para contadores, usar recordEvent también
+            this.metrics.recordEvent('reconnection_metrics_update', {
+                totalAttempts: metrics.totalAttempts,
+                successful: metrics.successfulReconnections,
+                failed: metrics.failedReconnections,
+                timestamp: Date.now()
+            });
+            
+        } catch (error) {
+            logger.error('Error recording reconnection metrics:', error);
+        }
+    }
+
+    setupReconnectionEndpoints() {
+        // Add these to your existing routes setup
+        
+        // Get reconnection status for all clients
+        this.app.get('/api/reconnection/status', (req, res) => {
+            try {
+                const metrics = this.whatsappClient.getReconnectionMetrics();
+                res.json({
+                    success: true,
+                    data: metrics
+                });
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: 'Failed to get reconnection status',
+                    message: error.message
+                });
+            }
+        });
+        
+        // Force reconnection for specific client
+        this.app.post('/api/reconnection/force/:number', async (req, res) => {
+            try {
+                const { number } = req.params;
+                
+                if (!this.whatsappClient.clients.has(number)) {
+                    return res.status(404).json({
+                        success: false,
+                        error: 'Client not found'
+                    });
+                }
+                
+                // Trigger manual reconnection
+                this.whatsappClient.handleReconnection(number, 'manual_trigger');
+                
+                res.json({
+                    success: true,
+                    message: `Reconnection triggered for client ${number}`
+                });
+                
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: 'Failed to trigger reconnection',
+                    message: error.message
+                });
+            }
+        });
     }
 
     // Métodos de acceso para compatibilidad con rutas API
@@ -628,64 +1066,142 @@ class WhatsAppServer {
 // Check if running in cluster mode
 if (cluster.isMaster && process.env.NODE_ENV === 'production') {
     const numCPUs = os.cpus().length;
-    const workers = Math.min(numCPUs, parseInt(process.env.MAX_WORKERS) || numCPUs);
+    const workers = Math.min(numCPUs, parseInt(process.env.MAX_WORKERS) || Math.max(2, numCPUs));
     
     logger.info(`Master ${process.pid} starting ${workers} workers`);
 
-    // Fork workers
+    // NUEVO: Rastrear workers para mejor gestión
+    const workerInfo = new Map();
+
+    // Fork workers con información de seguimiento
     for (let i = 0; i < workers; i++) {
-        cluster.fork();
+        const worker = cluster.fork();
+        workerInfo.set(worker.id, {
+            worker,
+            startTime: Date.now(),
+            restarts: 0
+        });
     }
 
     cluster.on('exit', (worker, code, signal) => {
+        const info = workerInfo.get(worker.id);
+        
         if (!worker.exitedAfterDisconnect) {
-            logger.warn(`Worker ${worker.process.pid} died (${signal || code}). Restarting...`);
-            cluster.fork();
+            logger.warn(`Worker ${worker.process.pid} died (${signal || code}).`);
+            
+            // MODIFICADO: Prevenir restart loops
+            if (info) {
+                info.restarts++;
+                const timeSinceStart = Date.now() - info.startTime;
+                
+                // Si el worker muere muy rápido, esperar antes de reiniciar
+                if (timeSinceStart < 10000) { // Menos de 10 segundos
+                    logger.warn(`Worker died quickly, waiting before restart (restarts: ${info.restarts})`);
+                    
+                    if (info.restarts > 5) {
+                        logger.error(`Worker ${worker.id} restarted too many times, not restarting`);
+                        workerInfo.delete(worker.id);
+                        return;
+                    }
+                    
+                    setTimeout(() => {
+                        const newWorker = cluster.fork();
+                        workerInfo.set(newWorker.id, {
+                            worker: newWorker,
+                            startTime: Date.now(),
+                            restarts: info.restarts
+                        });
+                    }, 5000 * info.restarts); // Backoff exponencial
+                } else {
+                    // Restart normal
+                    const newWorker = cluster.fork();
+                    workerInfo.set(newWorker.id, {
+                        worker: newWorker,
+                        startTime: Date.now(),
+                        restarts: 0
+                    });
+                }
+            }
+        } else {
+            logger.info(`Worker ${worker.process.pid} exited cleanly`);
+            workerInfo.delete(worker.id);
         }
     });
 
-    // Graceful restart
+    // MODIFICADO: Graceful restart mejorado
     process.on('SIGUSR2', () => {
         logger.info('Graceful restart initiated');
         
-        Object.values(cluster.workers).forEach(worker => {
-            worker.send('shutdown');
-            
+        // Disconnect workers gradualmente
+        const workers = Array.from(workerInfo.values());
+        workers.forEach((info, index) => {
             setTimeout(() => {
-                worker.kill('SIGTERM');
-            }, 10000);
+                info.worker.send('shutdown');
+                
+                setTimeout(() => {
+                    if (!info.worker.isDead()) {
+                        info.worker.kill('SIGTERM');
+                    }
+                }, 15000); // Aumentado a 15 segundos
+            }, index * 2000); // Escalonar por 2 segundos
         });
     });
 
-    // Handle process shutdown
-    process.on('SIGTERM', () => {
-        logger.info('Master received SIGTERM, shutting down workers');
-        Object.values(cluster.workers).forEach(worker => {
-            worker.disconnect();
+    // Handle master process shutdown
+    const masterShutdown = (signal) => {
+        logger.info(`Master received ${signal}, shutting down workers`);
+        
+        const workers = Array.from(workerInfo.values());
+        workers.forEach(info => {
+            info.worker.disconnect();
         });
-    });
+        
+        // Force exit after timeout
+        setTimeout(() => {
+            logger.warn('Force exiting master process');
+            process.exit(0);
+        }, 30000);
+    };
+
+    process.once('SIGTERM', () => masterShutdown('SIGTERM'));
+    process.once('SIGINT', () => masterShutdown('SIGINT'));
 
 } else {
-    // Worker process
+    // Worker process - MODIFICADO: Mejor configuración por worker
     const server = new WhatsAppServer({
         port: process.env.PORT || 5000,
         heartbeatInterval: 30000,
-        maxWsConnections: 250 // Por worker
+        maxWsConnections: cluster.isMaster ? 1000 : 250, // Por worker en cluster
+        enableAutoReconnection: true,
+        maxConcurrentReconnections: cluster.isMaster ? 5 : 3 // Menos por worker
     });
     
-    // Handle worker shutdown message
+    // MODIFICADO: Handle worker shutdown message con timeout
     process.on('message', (msg) => {
         if (msg === 'shutdown') {
-            server.cleanup();
+            logger.info(`Worker ${process.pid} received shutdown message`);
+            
+            // Shutdown graceful con timeout
+            Promise.race([
+                server.cleanup(),
+                new Promise(resolve => setTimeout(resolve, 12000))
+            ]).then(() => {
+                process.exit(0);
+            }).catch(error => {
+                logger.error('Worker shutdown error:', error);
+                process.exit(1);
+            });
         }
     });
 
-    // Handle worker process signals
-    process.on('SIGTERM', () => {
+    // Handle worker process signals - usar once() para evitar duplicados
+    process.once('SIGTERM', () => {
+        logger.info(`Worker ${process.pid} received SIGTERM`);
         server.cleanup();
     });
 
-    process.on('SIGINT', () => {
+    process.once('SIGINT', () => {
+        logger.info(`Worker ${process.pid} received SIGINT`);
         server.cleanup();
     });
     
