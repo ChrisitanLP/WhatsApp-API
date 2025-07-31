@@ -10,13 +10,52 @@ const { HTTP_STATUS, MESSAGES } = require('../utils/constants');
 class ClientController {
     constructor() {
         this.whatsappService = new BaseWhatsAppService();
+
+        this.serviceInitialized = false;
+        this.initializationPromise = null;
+    }
+
+    /**
+     * Asegurar que el servicio esté inicializado antes de usarlo
+     */
+    async ensureServiceInitialized() {
+        if (this.serviceInitialized) {
+            return;
+        }
+
+        if (this.initializationPromise) {
+            await this.initializationPromise;
+            return;
+        }
+
+        this.initializationPromise = this.whatsappService.initializeService();
+        
+        try {
+            await this.initializationPromise;
+            this.serviceInitialized = true;
+            logger.debug('WhatsApp service initialized in controller');
+        } catch (error) {
+            logger.error('Failed to initialize WhatsApp service in controller:', error);
+            this.initializationPromise = null;
+            throw error;
+        }
     }
 
     /**
      * Add new WhatsApp client
      */
     addClient = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
         const { number } = ClientValidators.addClient(req.body);
+        
+        // Verificar si el cliente ya existe
+        const exists = await this.whatsappService.checkClientExists(number);
+        if (exists) {
+            logger.warn(`Client ${number} already exists`);
+            return ResponseHelper.success(res, {}, `Client ${number} already exists`);
+        }
+        
         await this.whatsappService.createClient(number);
         logger.info(`Cliente ${number} agregado exitosamente`);
         
@@ -27,7 +66,16 @@ class ClientController {
      * Remove WhatsApp client
      */
     removeClient = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
         const { number } = ClientValidators.removeClient(req.body);
+        
+        // Verificar si el cliente existe antes de intentar eliminarlo
+        const exists = await this.whatsappService.checkClientExists(number);
+        if (!exists) {
+            return ResponseHelper.notFound(res, `Client ${number} not found`);
+        }
+        
         await this.whatsappService.deleteClient(number);
         logger.info(`Cliente ${number} eliminado exitosamente`);
         
@@ -38,36 +86,72 @@ class ClientController {
         );
     });
 
-
     /**
     * Get QR code for client authentication
     */
     getQrCode = asyncHandler(async (req, res) => {
-        const { number } = AuthValidators.getQrCode(req.params);
-        const qrCode = await this.whatsappService.getClientQr(number);
-        if (!qrCode) {
-        logger.warn(`QR no disponible para número: ${number}`);
-        const clientExists = await this.whatsappService.checkClientExists(number);
-        if (clientExists) {
-            logger.info(`Cliente existe para ${number}, pero QR no disponible. Reintentando inicialización.`);
-            
-            try {
-            await this.whatsappService.refreshClient(number);
-            return ResponseHelper.success(
-                res, 
-                {}, 
-                MESSAGES.ERROR.QR_GENERATION_IN_PROGRESS,
-                HTTP_STATUS.ACCEPTED
-            );
-            } catch (refreshError) {
-            logger.error(`Error reiniciando cliente ${number}:`, refreshError);
-            }
-        }
-
-        return ResponseHelper.notFound(res, MESSAGES.ERROR.QR_NOT_AVAILABLE);
-        }
+        await this.ensureServiceInitialized();
         
-        return ResponseHelper.success(res, { qr: qrCode });
+        const { number } = AuthValidators.getQrCode(req.params);
+        
+        try {
+            const qrCode = await this.whatsappService.getClientQr(number);
+            
+            if (!qrCode) {
+                logger.warn(`QR no disponible para número: ${number}`);
+                
+                const clientExists = await this.whatsappService.checkClientExists(number);
+                
+                if (clientExists) {
+                    // MODIFICADO: Verificar si el cliente está en proceso de inicialización
+                    const clientStatus = await this.whatsappService.checkClientStatus(number);
+                    
+                    if (!clientStatus.authenticated && !clientStatus.ready) {
+                        logger.info(`Cliente existe para ${number}, pero QR no disponible. Estado: autenticado=${clientStatus.authenticated}, listo=${clientStatus.ready}`);
+                        
+                        // Solo refrescar si no está en proceso de reconexión
+                        const whatsappClient = this.whatsappService.whatsAppClient;
+                        const isReconnecting = whatsappClient?.activeReconnections?.has(number);
+                        
+                        if (!isReconnecting) {
+                            try {
+                                await this.whatsappService.refreshClient(number);
+                                return ResponseHelper.success(
+                                    res, 
+                                    { refreshed: true }, 
+                                    MESSAGES.ERROR.QR_GENERATION_IN_PROGRESS,
+                                    HTTP_STATUS.ACCEPTED
+                                );
+                            } catch (refreshError) {
+                                logger.error(`Error reiniciando cliente ${number}:`, refreshError);
+                                return ResponseHelper.error(res, 
+                                    `Failed to refresh client: ${refreshError.message}`, 
+                                    HTTP_STATUS.INTERNAL_SERVER_ERROR
+                                );
+                            }
+                        } else {
+                            return ResponseHelper.success(
+                                res, 
+                                { reconnecting: true }, 
+                                'Client is reconnecting, please wait',
+                                HTTP_STATUS.ACCEPTED
+                            );
+                        }
+                    }
+                }
+
+                return ResponseHelper.notFound(res, MESSAGES.ERROR.QR_NOT_AVAILABLE);
+            }
+            
+            return ResponseHelper.success(res, { qr: qrCode });
+            
+        } catch (error) {
+            logger.error(`Error getting QR for ${number}:`, error);
+            return ResponseHelper.error(res, 
+                `Failed to get QR code: ${error.message}`, 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
     });
 
     /**
@@ -101,6 +185,535 @@ class ClientController {
         const accounts = await this.whatsappService.getAllAuthenticatedAccountsInfo();
         
         return ResponseHelper.success(res, { accounts });
+    });
+
+    /**
+     * Get detailed reconnection metrics for all clients
+     */
+    getReconnectionMetrics = asyncHandler(async (req, res) => {
+        const metrics = await this.whatsappService.getServiceMetrics();
+        
+        return ResponseHelper.success(res, {
+            reconnection: metrics.reconnection || {},
+            service: metrics.service || {},
+            monitoring: metrics.monitoring || {},
+            timestamp: Date.now()
+        });
+    });
+
+    /**
+     * Force health check for specific client or all clients
+     */
+    forceHealthCheck = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
+        const { number } = req.params;
+        
+        try {
+            let result;
+            
+            if (number && number !== 'all') {
+                // Health check para cliente específico
+                const { number: clientNumber } = AuthValidators.getClientStatus({ number });
+                
+                // Verificar que el cliente existe
+                const clientExists = await this.whatsappService.checkClientExists(clientNumber);
+                if (!clientExists) {
+                    return ResponseHelper.notFound(res, `Client ${clientNumber} not found`);
+                }
+                
+                result = await this.whatsappService.forceHealthCheck(clientNumber);
+                
+                return ResponseHelper.success(res, {
+                    client: clientNumber,
+                    monitoring: result,
+                    message: `Health check completed for client ${clientNumber}`,
+                    timestamp: Date.now()
+                });
+            } else {
+                // Health check para todos los clientes
+                result = await this.whatsappService.forceHealthCheck();
+                
+                return ResponseHelper.success(res, {
+                    clients: Array.isArray(result) ? result.length : 0,
+                    monitoring: result,
+                    message: `Health check completed for ${Array.isArray(result) ? result.length : 0} clients`,
+                    timestamp: Date.now()
+                });
+            }
+            
+        } catch (error) {
+            logger.error(`Error performing health check:`, error);
+            return ResponseHelper.error(res, 
+                `Health check failed: ${error.message}`, 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
+    });
+
+    /**
+     * Get detailed client monitoring status
+     */
+    getClientMonitoring = asyncHandler(async (req, res) => {
+        const { number } = AuthValidators.getClientStatus(req.params);
+        
+        // Verificar que el cliente existe
+        const clientExists = await this.whatsappService.checkClientExists(number);
+        if (!clientExists) {
+            return ResponseHelper.notFound(res, `Client ${number} not found`);
+        }
+        
+        // Obtener estado detallado
+        const clientStatus = await this.whatsappService.checkClientStatus(number);
+        const serviceMetrics = await this.whatsappService.getServiceMetrics();
+        
+        // Buscar información específica del cliente en el monitoreo
+        const clientMonitoring = serviceMetrics.monitoring?.clients?.find(
+            c => c.number === number
+        ) || null;
+        
+        return ResponseHelper.success(res, {
+            number,
+            status: clientStatus,
+            monitoring: clientMonitoring,
+            lastCheck: Date.now()
+        });
+    });
+
+    /**
+     * Force reconnection for specific client
+     */
+    forceReconnection = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
+        const { number } = AuthValidators.getClientStatus(req.params);
+        const { reason } = req.body;
+        
+        // Verificar que el cliente existe
+        const clientExists = await this.whatsappService.checkClientExists(number);
+        if (!clientExists) {
+            return ResponseHelper.notFound(res, `Client ${number} not found`);
+        }
+        
+        try {
+            // Acceder al cliente WhatsApp directamente para forzar reconexión
+            const whatsappClient = this.whatsappService.whatsAppClient;
+            
+            if (!whatsappClient) {
+                return ResponseHelper.error(res, 
+                    'WhatsApp client not available', 
+                    HTTP_STATUS.SERVICE_UNAVAILABLE
+                );
+            }
+            
+            // Verificar que no hay reconexión en progreso
+            if (whatsappClient.activeReconnections?.has(number)) {
+                return ResponseHelper.error(res, 
+                    `Reconnection already in progress for client ${number}`, 
+                    HTTP_STATUS.CONFLICT
+                );
+            }
+            
+            // NUEVO: Verificar la última reconexión para evitar spam
+            const healthStatus = whatsappClient.clientHealthStatus?.get(number);
+            if (healthStatus && healthStatus.lastAttempt) {
+                const timeSinceLastAttempt = Date.now() - healthStatus.lastAttempt;
+                const minInterval = 60000; // 1 minuto mínimo
+                
+                if (timeSinceLastAttempt < minInterval) {
+                    return ResponseHelper.error(res, 
+                        `Please wait ${Math.ceil((minInterval - timeSinceLastAttempt) / 1000)} seconds before forcing reconnection again`, 
+                        HTTP_STATUS.TOO_MANY_REQUESTS
+                    );
+                }
+            }
+            
+            // Forzar reconexión
+            const reconnectionReason = reason || 'manual_force_reconnection';
+            setImmediate(() => {
+                whatsappClient.handleReconnection(number, reconnectionReason);
+            });
+            
+            logger.info(`Manual reconnection triggered for client ${number} with reason: ${reconnectionReason}`);
+            
+            return ResponseHelper.success(res, {
+                number,
+                reason: reconnectionReason,
+                message: `Reconnection triggered for client ${number}`,
+                timestamp: Date.now()
+            }, HTTP_STATUS.ACCEPTED);
+            
+        } catch (error) {
+            logger.error(`Error forcing reconnection for ${number}:`, error);
+            return ResponseHelper.error(res, 
+                `Failed to trigger reconnection: ${error.message}`, 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
+    });
+
+    /**
+     * Cancel pending reconnection for specific client
+     */
+    cancelReconnection = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
+        const { number } = AuthValidators.getClientStatus(req.params);
+        
+        try {
+            // Acceder al cliente WhatsApp directamente
+            const whatsappClient = this.whatsappService.whatsAppClient;
+            
+            if (!whatsappClient) {
+                return ResponseHelper.error(res, 
+                    'WhatsApp client not available', 
+                    HTTP_STATUS.SERVICE_UNAVAILABLE
+                );
+            }
+            
+            // Verificar si hay reconexión activa o en cola
+            const hasActiveReconnection = whatsappClient.activeReconnections?.has(number);
+            const hasQueuedReconnection = whatsappClient.reconnectionQueue?.has(number);
+            
+            if (!hasActiveReconnection && !hasQueuedReconnection) {
+                return ResponseHelper.notFound(res, 
+                    `No pending reconnection found for client ${number}`
+                );
+            }
+            
+            // Intentar cancelar reconexión
+            const cancelled = whatsappClient.cancelReconnection(number);
+            
+            if (cancelled) {
+                logger.info(`Reconnection cancelled for client ${number}`);
+                return ResponseHelper.success(res, {
+                    number,
+                    message: `Reconnection cancelled for client ${number}`,
+                    cancelled: {
+                        active: hasActiveReconnection,
+                        queued: hasQueuedReconnection
+                    },
+                    timestamp: Date.now()
+                });
+            } else {
+                return ResponseHelper.error(res, 
+                    `Failed to cancel reconnection for client ${number}`, 
+                    HTTP_STATUS.INTERNAL_SERVER_ERROR
+                );
+            }
+            
+        } catch (error) {
+            logger.error(`Error cancelling reconnection for ${number}:`, error);
+            return ResponseHelper.error(res, 
+                `Failed to cancel reconnection: ${error.message}`, 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
+    });
+
+    /**
+     * Get system health status
+     */
+    getSystemHealth = asyncHandler(async (req, res) => {
+        try {
+            const health = await this.whatsappService.healthCheck();
+            const statusCode = health.status === 'healthy' ? HTTP_STATUS.OK : 
+                            health.status === 'degraded' ? HTTP_STATUS.OK : 
+                            HTTP_STATUS.SERVICE_UNAVAILABLE;
+            
+            return res.status(statusCode).json({
+                success: health.status !== 'unhealthy',
+                data: health,
+                timestamp: Date.now()
+            });
+            
+        } catch (error) {
+            logger.error('System health check failed:', error);
+            return ResponseHelper.error(res, 
+                'Health check failed', 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
+    });
+
+    /**
+     * Get comprehensive service statistics
+     */
+    getServiceStats = asyncHandler(async (req, res) => {
+        try {
+            await this.ensureServiceInitialized();
+            
+            const metrics = await this.whatsappService.getServiceMetrics();
+            const accounts = await this.whatsappService.getAllAuthenticatedAccountsInfo();
+            
+            // NUEVO: Obtener información adicional del cliente WhatsApp
+            const whatsappClient = this.whatsappService.whatsAppClient;
+            const reconnectionInfo = whatsappClient?.getReconnectionMetrics?.() || {};
+            
+            // Calcular estadísticas adicionales
+            const stats = {
+                service: metrics.service || {},
+                clients: {
+                    total: metrics.totalClients || 0,
+                    authenticated: accounts.length,
+                    monitoring: metrics.monitoring || {},
+                    reconnection: {
+                        active: reconnectionInfo.activeReconnections || 0,
+                        queued: reconnectionInfo.queuedReconnections || 0,
+                        successRate: reconnectionInfo.successRate || 0,
+                        totalAttempts: reconnectionInfo.totalAttempts || 0
+                    },
+                    distribution: accounts.map(acc => ({
+                        number: acc.number,
+                        displayName: acc.display_name || acc.displayName,
+                        status: acc.status,
+                        lastActivity: acc.last_activity || acc.lastActivity
+                    }))
+                },
+                system: {
+                    uptime: process.uptime(),
+                    memory: process.memoryUsage(),
+                    nodeVersion: process.version,
+                    platform: process.platform,
+                    processId: process.pid
+                },
+                health: await this.whatsappService.healthCheck(),
+                timestamp: Date.now()
+            };
+            
+            return ResponseHelper.success(res, stats);
+            
+        } catch (error) {
+            logger.error('Error getting service stats:', error);
+            return ResponseHelper.error(res, 
+                `Failed to get service statistics: ${error.message}`, 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
+    });
+
+    /**
+     * Restart specific client (remove and recreate)
+     */
+    restartClient = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
+        const { number } = ClientValidators.removeClient(req.body);
+        
+        try {
+            // Verificar que el cliente existe
+            const clientExists = await this.whatsappService.checkClientExists(number);
+            if (!clientExists) {
+                return ResponseHelper.notFound(res, `Client ${number} not found`);
+            }
+            
+            // NUEVO: Verificar si hay operaciones en progreso
+            const whatsappClient = this.whatsappService.whatsAppClient;
+            if (whatsappClient?.activeReconnections?.has(number)) {
+                return ResponseHelper.error(res, 
+                    `Cannot restart client ${number} - reconnection in progress`, 
+                    HTTP_STATUS.CONFLICT
+                );
+            }
+            
+            logger.info(`Restarting client ${number}...`);
+            
+            // Primero cancelar cualquier reconexión pendiente
+            if (whatsappClient?.cancelReconnection) {
+                whatsappClient.cancelReconnection(number);
+            }
+            
+            // Remover el cliente
+            await this.whatsappService.deleteClient(number);
+            
+            // MODIFICADO: Esperar más tiempo para asegurar cleanup completo
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Recrear el cliente
+            await this.whatsappService.createClient(number);
+            
+            logger.info(`Client ${number} restarted successfully`);
+            
+            return ResponseHelper.success(res, {
+                number,
+                message: `Client ${number} restarted successfully`,
+                timestamp: Date.now()
+            }, HTTP_STATUS.ACCEPTED);
+            
+        } catch (error) {
+            logger.error(`Error restarting client ${number}:`, error);
+            return ResponseHelper.error(res, 
+                `Failed to restart client: ${error.message}`, 
+                HTTP_STATUS.INTERNAL_SERVER_ERROR
+            );
+        }
+    });
+
+    /**
+     * Bulk operations for multiple clients
+     */
+    bulkClientOperation = asyncHandler(async (req, res) => {
+        await this.ensureServiceInitialized();
+        
+        const { operation, numbers, options = {} } = req.body;
+        
+        // Validar input
+        if (!operation || !Array.isArray(numbers) || numbers.length === 0) {
+            return ResponseHelper.error(res, 
+                'Invalid input: operation and numbers array required', 
+                HTTP_STATUS.BAD_REQUEST
+            );
+        }
+        
+        if (numbers.length > 20) {
+            return ResponseHelper.error(res, 
+                'Too many clients for bulk operation (max 20)', 
+                HTTP_STATUS.BAD_REQUEST
+            );
+        }
+        
+        const validOperations = ['restart', 'healthCheck', 'forceReconnection', 'remove'];
+        if (!validOperations.includes(operation)) {
+            return ResponseHelper.error(res, 
+                `Invalid operation. Must be one of: ${validOperations.join(', ')}`, 
+                HTTP_STATUS.BAD_REQUEST
+            );
+        }
+        
+        const results = [];
+        const batchSize = Math.min(options.batchSize || 3, 5); // Máximo 5 por lote
+        const delay = Math.max(options.delay || 2000, 1000); // Mínimo 1 segundo
+        
+        logger.info(`Starting bulk ${operation} for ${numbers.length} clients (batch size: ${batchSize})`);
+        
+        // MODIFICADO: Verificar estado de clientes antes de operaciones masivas
+        if (['restart', 'forceReconnection'].includes(operation)) {
+            const whatsappClient = this.whatsappService.whatsAppClient;
+            const activeReconnections = whatsappClient?.activeReconnections?.size || 0;
+            
+            if (activeReconnections > 2) {
+                return ResponseHelper.error(res, 
+                    `Cannot perform bulk ${operation} - too many active reconnections (${activeReconnections})`, 
+                    HTTP_STATUS.CONFLICT
+                );
+            }
+        }
+        
+        // Procesar en lotes con mejor control de errores
+        for (let i = 0; i < numbers.length; i += batchSize) {
+            const batch = numbers.slice(i, i + batchSize);
+            
+            const batchPromises = batch.map(async (number, batchIndex) => {
+                const globalIndex = i + batchIndex;
+                
+                try {
+                    // Delay escalonado dentro del lote
+                    if (batchIndex > 0) {
+                        await new Promise(resolve => setTimeout(resolve, 500 * batchIndex));
+                    }
+                    
+                    let result = { number, success: true, index: globalIndex };
+                    
+                    switch (operation) {
+                        case 'restart':
+                            // Verificar existencia primero
+                            const exists = await this.whatsappService.checkClientExists(number);
+                            if (!exists) {
+                                result.success = false;
+                                result.error = 'Client not found';
+                                break;
+                            }
+                            
+                            await this.whatsappService.deleteClient(number);
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            await this.whatsappService.createClient(number);
+                            result.message = 'Restarted successfully';
+                            break;
+                            
+                        case 'healthCheck':
+                            const monitoring = await this.whatsappService.forceHealthCheck(number);
+                            result.monitoring = monitoring;
+                            result.message = 'Health check completed';
+                            break;
+                            
+                        case 'forceReconnection':
+                            const whatsappClient = this.whatsappService.whatsAppClient;
+                            
+                            // Verificar si ya está en reconexión
+                            if (whatsappClient?.activeReconnections?.has(number)) {
+                                result.success = false;
+                                result.error = 'Reconnection already in progress';
+                                break;
+                            }
+                            
+                            setImmediate(() => {
+                                whatsappClient.handleReconnection(number, 'bulk_operation');
+                            });
+                            result.message = 'Reconnection triggered';
+                            break;
+                            
+                        case 'remove':
+                            const clientExists = await this.whatsappService.checkClientExists(number);
+                            if (!clientExists) {
+                                result.success = false;
+                                result.error = 'Client not found';
+                                break;
+                            }
+                            
+                            await this.whatsappService.deleteClient(number);
+                            result.message = 'Removed successfully';
+                            break;
+                    }
+                    
+                    return result;
+                    
+                } catch (error) {
+                    logger.error(`Bulk ${operation} failed for ${number}:`, error);
+                    return {
+                        number,
+                        success: false,
+                        error: error.message,
+                        index: globalIndex
+                    };
+                }
+            });
+            
+            const batchResults = await Promise.allSettled(batchPromises);
+            results.push(...batchResults.map(r => r.value || { 
+                success: false, 
+                error: r.reason?.message || 'Unknown error',
+                number: batch[results.length % batch.length] || 'unknown'
+            }));
+            
+            // Pausa entre lotes si no es el último
+            if (i + batchSize < numbers.length) {
+                logger.debug(`Completed batch ${Math.floor(i/batchSize) + 1}, waiting ${delay}ms before next batch`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+        
+        const successCount = results.filter(r => r.success).length;
+        const failedResults = results.filter(r => !r.success);
+        
+        logger.info(`Bulk ${operation} completed: ${successCount}/${numbers.length} successful`);
+        
+        if (failedResults.length > 0) {
+            logger.warn(`Bulk ${operation} failures:`, failedResults.map(r => `${r.number}: ${r.error}`));
+        }
+        
+        return ResponseHelper.success(res, {
+            operation,
+            total: numbers.length,
+            successful: successCount,
+            failed: numbers.length - successCount,
+            results,
+            summary: {
+                batchSize,
+                totalBatches: Math.ceil(numbers.length / batchSize),
+                duration: Date.now(),
+                failedClients: failedResults.map(r => r.number)
+            }
+        });
     });
 }
 
