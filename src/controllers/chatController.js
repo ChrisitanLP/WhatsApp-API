@@ -1,4 +1,111 @@
-// src/controllers/ChatController.js
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     ChatMessage:
+ *       type: object
+ *       properties:
+ *         id:
+ *           type: string
+ *           description: ID único del mensaje
+ *         from:
+ *           type: string
+ *           description: Remitente del mensaje
+ *         content:
+ *           type: string
+ *           description: Contenido del mensaje
+ *         timestamp:
+ *           type: string
+ *           format: date-time
+ *           description: Marca de tiempo del mensaje
+ *     Chat:
+ *       type: object
+ *       properties:
+ *         id:
+ *           type: string
+ *           description: ID único del chat
+ *         name:
+ *           type: string
+ *           description: Nombre del chat o contacto
+ *         unreadCount:
+ *           type: integer
+ *           description: Número de mensajes no leídos
+ *         timestamp:
+ *           type: integer
+ *           description: Timestamp del último mensaje
+ *         recentMessageDate:
+ *           type: integer
+ *           description: Fecha del mensaje más reciente
+ *         profilePicUrl:
+ *           type: string
+ *           description: URL de la foto de perfil
+ *         groupData:
+ *           type: array
+ *           items:
+ *             type: object
+ *           description: Datos del grupo (si aplica)
+ *         client:
+ *           type: string
+ *           description: ID del cliente de WhatsApp
+ *     PaginatedChatsResponse:
+ *       type: object
+ *       properties:
+ *         chats:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/Chat'
+ *         totalUnreadChats:
+ *           type: integer
+ *           description: Total de chats no leídos
+ *         currentPage:
+ *           type: integer
+ *           description: Página actual
+ *         totalPages:
+ *           type: integer
+ *           description: Total de páginas
+ *     PaginatedUnreadChatsResponse:
+ *       type: object
+ *       properties:
+ *         unreadChats:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/Chat'
+ *         totalUnreadChats:
+ *           type: integer
+ *           description: Total de chats no leídos
+ *         currentPage:
+ *           type: integer
+ *           description: Página actual
+ *         totalPages:
+ *           type: integer
+ *           description: Total de páginas
+ *     ChatActionRequest:
+ *       type: object
+ *       required:
+ *         - clientId
+ *         - tel
+ *         - isGroup
+ *       properties:
+ *         clientId:
+ *           type: string
+ *           description: ID del cliente de WhatsApp
+ *         tel:
+ *           type: string
+ *           description: Número de teléfono o ID del chat
+ *         isGroup:
+ *           type: boolean
+ *           description: Indica si es un chat de grupo
+ *     MuteChatRequest:
+ *       allOf:
+ *         - $ref: '#/components/schemas/ChatActionRequest'
+ *         - type: object
+ *           properties:
+ *             unmuteDate:
+ *               type: string
+ *               format: date-time
+ *               description: Fecha para desactivar el silencio (opcional)
+ */
+
 const ChatService = require('../services/api/chatService');
 const { asyncHandler } = require('../utils/asyncHandler');
 const ResponseHelper = require('../utils/responseHelper');
@@ -12,7 +119,36 @@ class ChatController {
     }
 
     /**
-     * Get chats with pagination
+     * @swagger
+     * /api/chats:
+     *   get:
+     *     tags: [Chats]
+     *     summary: Obtener chats con paginación
+     *     operationId: getChats
+     *     parameters:
+     *       - name: page
+     *         in: query
+     *         schema:
+     *           type: integer
+     *           default: 1
+     *         description: Número de página
+     *       - name: limit
+     *         in: query
+     *         schema:
+     *           type: integer
+     *           default: 20
+     *         description: Número de elementos por página
+     *     responses:
+     *       200:
+     *         description: Lista paginada de chats obtenida exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/PaginatedChatsResponse'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     getChats = asyncHandler(async (req, res) => {
         const { page, limit } = ChatValidators.pagination(req.query);
@@ -27,7 +163,36 @@ class ChatController {
     });
 
     /**
-     * Get unread chats with pagination
+     * @swagger
+     * /api/unreadChats:
+     *   get:
+     *     tags: [Chats]
+     *     summary: Obtener chats no leídos con paginación
+     *     operationId: getUnreadChats
+     *     parameters:
+     *       - name: page
+     *         in: query
+     *         schema:
+     *           type: integer
+     *           default: 1
+     *         description: Número de página
+     *       - name: limit
+     *         in: query
+     *         schema:
+     *           type: integer
+     *           default: 20
+     *         description: Número de elementos por página
+     *     responses:
+     *       200:
+     *         description: Lista paginada de chats no leídos obtenida exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/PaginatedUnreadChatsResponse'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     getUnreadChats = asyncHandler(async (req, res) => {
         const { page, limit } = ChatValidators.pagination(req.query);
@@ -42,7 +207,40 @@ class ChatController {
     });
 
     /**
-     * Mark chat as read
+     * @swagger
+     * /api/markChatRead/{clientId}/{tel}/{isGroup}:
+     *   post:
+     *     tags: [Chats]
+     *     summary: Marcar chat como leído
+     *     operationId: markChatAsRead
+     *     parameters:
+     *       - name: clientId
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: ID del cliente de WhatsApp
+     *       - name: tel
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: Número de teléfono o ID del chat
+     *       - name: isGroup
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: boolean
+     *         description: Indica si es un chat de grupo
+     *     responses:
+     *       200:
+     *         $ref: '#/components/responses/Success'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     markChatAsRead = asyncHandler(async (req, res) => {
         const { clientId, tel, isGroup } = ChatValidators.markChat(req.params);
@@ -53,7 +251,27 @@ class ChatController {
     });
 
     /**
-     * Mark chat as unread
+     * @swagger
+     * /api/markChatAsUnread:
+     *   post:
+     *     tags: [Chats]
+     *     summary: Marcar chat como no leído
+     *     operationId: markChatAsUnread
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             $ref: '#/components/schemas/ChatActionRequest'
+     *     responses:
+     *       200:
+     *         $ref: '#/components/responses/Success'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     markChatAsUnread = asyncHandler(async (req, res) => {
         const { clientId, tel, isGroup } = ChatValidators.markChat({}, req.body);
@@ -64,7 +282,27 @@ class ChatController {
     });
 
     /**
-     * Mute chat
+     * @swagger
+     * /api/muteChat:
+     *   post:
+     *     tags: [Chats]
+     *     summary: Silenciar chat
+     *     operationId: muteChat
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             $ref: '#/components/schemas/MuteChatRequest'
+     *     responses:
+     *       200:
+     *         $ref: '#/components/responses/Success'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     muteChat = asyncHandler(async (req, res) => {
         const { clientId, tel, isGroup, unmuteDate } = req.body;
@@ -81,8 +319,36 @@ class ChatController {
     });
 
     /**
-     * Pin chat
-    */
+     * @swagger
+     * /api/pinChat:
+     *   post:
+     *     tags: [Chats]
+     *     summary: Fijar chat
+     *     operationId: pinChat
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             $ref: '#/components/schemas/ChatActionRequest'
+     *     responses:
+     *       200:
+     *         description: Chat fijado exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 pinned:
+     *                   type: boolean
+     *                   example: true
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
+     */
     pinChat = asyncHandler(async (req, res) => {
         const { clientId, tel, isGroup } = ChatValidators.markChat({}, req.body);
         await this.whatsappService.pinChat({ clientId, tel, isGroup });
@@ -92,7 +358,35 @@ class ChatController {
     });
 
     /**
-     * Unpin chat
+     * @swagger
+     * /api/unpinChat:
+     *   post:
+     *     tags: [Chats]
+     *     summary: Desfijar chat
+     *     operationId: unpinChat
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             $ref: '#/components/schemas/ChatActionRequest'
+     *     responses:
+     *       200:
+     *         description: Chat desfijado exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 unpinned:
+     *                   type: boolean
+     *                   example: true
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     unpinChat = asyncHandler(async (req, res) => {
         const { clientId, tel, isGroup } = ChatValidators.markChat({}, req.body);
@@ -103,7 +397,43 @@ class ChatController {
     });
 
     /**
-     * Get chat messages
+     * @swagger
+     * /api/chatMessages/{clientId}/{tel}:
+     *   get:
+     *     tags: [Chats]
+     *     summary: Obtener mensajes de un chat
+     *     operationId: getChatMessages
+     *     parameters:
+     *       - name: clientId
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: ID del cliente de WhatsApp
+     *       - name: tel
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: Número de teléfono o ID del chat
+     *     responses:
+     *       200:
+     *         description: Mensajes del chat obtenidos exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 messages:
+     *                   type: array
+     *                   items:
+     *                     $ref: '#/components/schemas/ChatMessage'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     getChatMessages = asyncHandler(async (req, res) => {
         const { clientId, tel } = ChatValidators.getChatMessages(req.params);
@@ -114,7 +444,43 @@ class ChatController {
     });
 
     /**
-     * Get group chat messages
+     * @swagger
+     * /api/chatGroupMessages/{number}/{groupId}:
+     *   get:
+     *     tags: [Chats]
+     *     summary: Obtener mensajes de un grupo
+     *     operationId: getGroupChatMessages
+     *     parameters:
+     *       - name: number
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: Número del cliente de WhatsApp
+     *       - name: groupId
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: ID del grupo
+     *     responses:
+     *       200:
+     *         description: Mensajes del grupo obtenidos exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 messages:
+     *                   type: array
+     *                   items:
+     *                     $ref: '#/components/schemas/ChatMessage'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
      */
     getGroupChatMessages = asyncHandler(async (req, res) => {
         const { number, groupId } = req.params;

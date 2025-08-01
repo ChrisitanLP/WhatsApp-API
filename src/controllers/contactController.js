@@ -1,3 +1,37 @@
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     Contact:
+ *       type: object
+ *       properties:
+ *         id:
+ *           type: string
+ *         name:
+ *           type: string
+ *         number:
+ *           type: string
+ *         profilePicUrl:
+ *           type: string
+ *           nullable: true
+ *     SaveContactRequest:
+ *       type: object
+ *       required:
+ *         - clientNumber
+ *         - contactNumber
+ *         - contactName
+ *       properties:
+ *         clientNumber:
+ *           type: string
+ *           description: Número del cliente WhatsApp
+ *         contactNumber:
+ *           type: string
+ *           description: Número del contacto a guardar
+ *         contactName:
+ *           type: string
+ *           description: Nombre del contacto
+ */
+
 const ContactService = require('../services/api/contactService');
 const { asyncHandler } = require('../utils/asyncHandler');
 const ResponseHelper = require('../utils/responseHelper');
@@ -78,7 +112,85 @@ class ContactController {
     }
 
     /**
-     * Get contacts with pagination and enhanced error handling
+     * @swagger
+     * /api/getContacts:
+     *   get:
+     *     tags: [Contacts]
+     *     summary: Obtener lista de contactos con paginación
+     *     operationId: getContacts
+     *     parameters:
+     *       - in: query
+     *         name: page
+     *         schema:
+     *           type: integer
+     *           minimum: 1
+     *           default: 1
+     *         description: Número de página para la paginación
+     *         example: 1
+     *     responses:
+     *       200:
+     *         description: Contactos obtenidos exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         contacts:
+     *                           type: array
+     *                           items:
+     *                             $ref: '#/components/schemas/Contact'
+     *                         count:
+     *                           type: integer
+     *                           description: Número de contactos en la página actual
+     *                           example: 25
+     *                         page:
+     *                           type: integer
+     *                           description: Página actual
+     *                           example: 1
+     *                         requestId:
+     *                           type: string
+     *                           description: ID único de la petición
+     *                           example: "contacts_1234567890_abc123def"
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       408:
+     *         description: Timeout de la petición
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         requestId:
+     *                           type: string
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         requestId:
+     *                           type: string
+     *                         details:
+     *                           type: string
+     *                           description: Detalles del error (solo en desarrollo)
      */
     getContacts = asyncHandler(async (req, res) => {
         const startTime = Date.now();
@@ -166,7 +278,96 @@ class ContactController {
     });
 
     /**
-     * Save contact for specific client with enhanced validation and error handling
+     * @swagger
+     * /api/saveContact:
+     *   post:
+     *     tags: [Contacts]
+     *     summary: Guardar nuevo contacto en WhatsApp
+     *     operationId: saveContact
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             $ref: '#/components/schemas/SaveContactRequest'
+     *           example:
+     *             clientNumber: "1234567890"
+     *             contactNumber: "0987654321"
+     *             contactName: "Juan Pérez"
+     *     responses:
+     *       200:
+     *         description: Contacto guardado exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         clientNumber:
+     *                           type: string
+     *                           description: Número del cliente WhatsApp
+     *                           example: "1234567890"
+     *                         contactName:
+     *                           type: string
+     *                           description: Nombre del contacto guardado
+     *                           example: "Juan Pérez"
+     *                         requestId:
+     *                           type: string
+     *                           description: ID único de la petición
+     *                           example: "save_contact_1234567890_xyz789"
+     *       400:
+     *         $ref: '#/components/responses/BadRequest' 
+     *       404:
+     *         description: Cliente WhatsApp no encontrado o no está listo
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         requestId:
+     *                           type: string
+     *       408:
+     *         description: Timeout al guardar contacto
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         requestId:
+     *                           type: string
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         requestId:
+     *                           type: string
+     *                         details:
+     *                           type: string
+     *                           description: Detalles del error (solo en desarrollo)
      */
     saveContact = asyncHandler(async (req, res) => {
         const startTime = Date.now();
@@ -258,7 +459,40 @@ class ContactController {
     });
 
     /**
-     * Get controller metrics endpoint
+     * @swagger
+     * /api/metrics:
+     *   get:
+     *     tags: [Contacts]
+     *     summary: Obtener métricas del servicio de contactos
+     *     operationId: getContactMetrics
+     *     responses:
+     *       200:
+     *         description: Métricas obtenidas exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         controller:
+     *                           $ref: '#/components/schemas/ControllerMetrics'
+     *                         service:
+     *                           $ref: '#/components/schemas/ContactServiceMetrics'
+     *                         timestamp:
+     *                           type: integer
+     *                           format: int64
+     *                           description: Timestamp de la consulta
+     *                           example: 1640995200000
+     *       500:
+     *         description: Error al obtener métricas
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     getMetrics = asyncHandler(async (req, res) => {
         try {
@@ -277,7 +511,58 @@ class ContactController {
     });
 
     /**
-     * Health check endpoint
+     * @swagger
+     * /api/health:
+     *   get:
+     *     tags: [Contacts]
+     *     summary: Verificar estado de salud del servicio de contactos
+     *     operationId: getContactsHealthCheck
+     *     responses:
+     *       200:
+     *         description: Servicio saludable
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 success:
+     *                   type: boolean
+     *                   example: true
+     *                 data:
+     *                   $ref: '#/components/schemas/HealthStatus'
+     *                 message:
+     *                   type: string
+     *                   example: "Service is healthy"
+     *       206:
+     *         description: Servicio degradado
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 success:
+     *                   type: boolean
+     *                   example: true
+     *                 data:
+     *                   $ref: '#/components/schemas/HealthStatus'
+     *                 message:
+     *                   type: string
+     *                   example: "Service is degraded"
+     *       503:
+     *         description: Servicio no saludable
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 success:
+     *                   type: boolean
+     *                   example: false
+     *                 data:
+     *                   $ref: '#/components/schemas/HealthStatus'
+     *                 message:
+     *                   type: string
+     *                   example: "Service is unhealthy"
      */
     healthCheck = asyncHandler(async (req, res) => {
         try {

@@ -1,4 +1,18 @@
-// src/controllers/ClientController.js
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     ClientStatus:
+ *       type: object
+ *       properties:
+ *         isAuthenticated:
+ *           type: boolean
+ *         isReady:
+ *           type: boolean
+ *         number:
+ *           type: string
+ */
+
 const BaseWhatsAppService = require('../services/api/baseService');
 const { asyncHandler } = require('../utils/asyncHandler');
 const ResponseHelper = require('../utils/responseHelper');
@@ -42,7 +56,45 @@ class ClientController {
     }
 
     /**
-     * Add new WhatsApp client
+     * @swagger
+     * /api/addClient:
+     *   post:
+     *     tags: [Clients]
+     *     summary: Agregar nuevo cliente WhatsApp
+     *     operationId: addClient
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             type: object
+     *             required:
+     *               - number
+     *             properties:
+     *               number:
+     *                 type: string
+     *                 pattern: '^[1-9][0-9]{7,14}$'
+     *                 description: Número de teléfono del cliente
+     *                 example: "1234567890123"
+     *           example:
+     *             number: "1234567890123"
+     *     responses:
+     *       200:
+     *         description: Cliente agregado exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       429:
+     *         $ref: '#/components/responses/TooManyRequests'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     addClient = asyncHandler(async (req, res) => {
         await this.ensureServiceInitialized();
@@ -63,7 +115,45 @@ class ClientController {
     });
 
     /**
-     * Remove WhatsApp client
+     * @swagger
+     * /api/removeClient:
+     *   post:
+     *     tags: [Clients]
+     *     summary: Eliminar cliente WhatsApp
+     *     operationId: removeClient
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             type: object
+     *             required:
+     *               - number
+     *             properties:
+     *               number:
+     *                 type: string
+     *                 pattern: '^[1-9][0-9]{7,14}$'
+     *                 description: Número de teléfono del cliente a eliminar
+     *                 example: "1234567890123"
+     *           example:
+     *             number: "1234567890123"
+     *     responses:
+     *       200:
+     *         description: Cliente eliminado exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     removeClient = asyncHandler(async (req, res) => {
         await this.ensureServiceInitialized();
@@ -87,8 +177,65 @@ class ClientController {
     });
 
     /**
-    * Get QR code for client authentication
-    */
+     * @swagger
+     * /api/qr/{number}:
+     *   get:
+     *     tags: [Clients]
+     *     summary: Obtener código QR para autenticación
+     *     operationId: getQrCode
+     *     parameters:
+     *       - in: path
+     *         name: number
+     *         required: true
+     *         schema:
+     *           type: string
+     *           pattern: '^[1-9][0-9]{7,14}$'
+     *         description: Número del cliente WhatsApp
+     *         example: "1234567890123"
+     *     responses:
+     *       200:
+     *         description: QR code generado exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         qr:
+     *                           type: string
+     *                           description: Código QR en formato base64
+     *                           example: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+     *       202:
+     *         description: Cliente en proceso de inicialización
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         refreshed:
+     *                           type: boolean
+     *                           example: true
+     *                         reconnecting:
+     *                           type: boolean
+     *                           example: false
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
+     */
     getQrCode = asyncHandler(async (req, res) => {
         await this.ensureServiceInitialized();
         
@@ -155,7 +302,46 @@ class ClientController {
     });
 
     /**
-     * Get client authentication status
+     * @swagger
+     * /api/status/{number}:
+     *   get:
+     *     tags: [Clients]
+     *     summary: Verificar estado de autenticación del cliente
+     *     operationId: getClientStatus
+     *     parameters:
+     *       - in: path
+     *         name: number
+     *         required: true
+     *         schema:
+     *           type: string
+     *           pattern: '^[1-9][0-9]{7,14}$'
+     *         description: Número del cliente WhatsApp
+     *         example: "1234567890123"
+     *     responses:
+     *       200:
+     *         description: Estado de autenticación obtenido exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         isAuthenticated:
+     *                           type: boolean
+     *                           description: Indica si el cliente está autenticado
+     *                           example: true
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     getClientStatus = asyncHandler(async (req, res) => {
         const { number } = AuthValidators.getClientStatus(req.params);
@@ -165,7 +351,41 @@ class ClientController {
     });
 
     /**
-     * Get detailed connection status
+     * @swagger
+     * /api/status_connection/{number}:
+     *   get:
+     *     tags: [Clients]
+     *     summary: Verificar estado de conexión detallado
+     *     operationId: getConnectionStatus
+     *     parameters:
+     *       - in: path
+     *         name: number
+     *         required: true
+     *         schema:
+     *           type: string
+     *           pattern: '^[1-9][0-9]{7,14}$'
+     *         description: Número del cliente WhatsApp
+     *         example: "1234567890123"
+     *     responses:
+     *       200:
+     *         description: Estado de conexión obtenido exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       $ref: '#/components/schemas/ClientStatus'
+     *       400:
+     *         $ref: '#/components/responses/BadRequest'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     getConnectionStatus = asyncHandler(async (req, res) => {
         const { number } = AuthValidators.getClientStatus(req.params);
@@ -179,7 +399,35 @@ class ClientController {
     });
 
     /**
-     * Get all authenticated accounts info
+     * @swagger
+     * /api/authenticated-accounts:
+     *   get:
+     *     tags: [Clients]
+     *     summary: Obtener todas las cuentas autenticadas
+     *     operationId: getAllAuthenticatedAccountsInfo
+     *     responses:
+     *       200:
+     *         description: Cuentas autenticadas obtenidas exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         accounts:
+     *                           type: array
+     *                           items:
+     *                             $ref: '#/components/schemas/AuthenticatedAccount'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     getAllAuthenticatedAccountsInfo = asyncHandler(async (req, res) => {
         const accounts = await this.whatsappService.getAllAuthenticatedAccountsInfo();
@@ -188,7 +436,41 @@ class ClientController {
     });
 
     /**
-     * Get detailed reconnection metrics for all clients
+     * @swagger
+     * /api/metrics/reconnection:
+     *   get:
+     *     tags: [Clients]
+     *     summary: Obtener métricas detalladas de reconexión
+     *     operationId: getReconnectionMetrics
+     *     responses:
+     *       200:
+     *         description: Métricas obtenidas exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         reconnection:
+     *                           $ref: '#/components/schemas/ReconnectionMetrics'
+     *                         service:
+     *                           $ref: '#/components/schemas/ServiceMetrics'
+     *                         monitoring:
+     *                           $ref: '#/components/schemas/MonitoringMetrics'
+     *                         timestamp:
+     *                           type: integer
+     *                           format: int64
+     *                           example: 1640995200000
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     getReconnectionMetrics = asyncHandler(async (req, res) => {
         const metrics = await this.whatsappService.getServiceMetrics();
@@ -202,7 +484,63 @@ class ClientController {
     });
 
     /**
-     * Force health check for specific client or all clients
+     * @swagger
+     * /api/health/{number}:
+     *   post:
+     *     tags: [Clients]
+     *     summary: Forzar verificación de salud para un cliente específico
+     *     operationId: forceHealthCheck
+     *     parameters:
+     *       - in: path
+     *         name: number
+     *         required: true
+     *         schema:
+     *           type: string
+     *           pattern: '^[1-9][0-9]{7,14}$|^all$'
+     *         description: Número del cliente WhatsApp o 'all' para todos los clientes
+     *         example: "1234567890123"
+     *     responses:
+     *       200:
+     *         description: Verificación de salud completada exitosamente
+     *         content:
+     *           application/json:
+     *             schema:
+     *               allOf:
+     *                 - $ref: '#/components/schemas/ApiResponse'
+     *                 - type: object
+     *                   properties:
+     *                     data:
+     *                       type: object
+     *                       properties:
+     *                         client:
+     *                           type: string
+     *                           description: Número del cliente verificado
+     *                           example: "1234567890123"
+     *                         clients:
+     *                           type: integer
+     *                           description: Número de clientes verificados (cuando es 'all')
+     *                           example: 5
+     *                         monitoring:
+     *                           oneOf:
+     *                             - $ref: '#/components/schemas/ClientMonitoring'
+     *                             - type: array
+     *                               items:
+     *                                 $ref: '#/components/schemas/ClientMonitoringStatus'
+     *                         message:
+     *                           type: string
+     *                           example: "Health check completed for client 1234567890123"
+     *                         timestamp:
+     *                           type: integer
+     *                           format: int64
+     *                           example: 1640995200000
+     *       404:
+     *         $ref: '#/components/responses/NotFound'
+     *       500:
+     *         description: Error interno del servidor
+     *         content:
+     *           application/json:
+     *             schema:
+     *               $ref: '#/components/schemas/ApiResponse'
      */
     forceHealthCheck = asyncHandler(async (req, res) => {
         await this.ensureServiceInitialized();
@@ -717,4 +1055,4 @@ class ClientController {
     });
 }
 
-module.exports = new ClientController();
+module.exports = new ClientController(); 
