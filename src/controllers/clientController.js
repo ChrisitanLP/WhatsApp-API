@@ -7,10 +7,160 @@
  *       properties:
  *         isAuthenticated:
  *           type: boolean
+ *           description: Indica si el cliente está autenticado
+ *           example: true
  *         isReady:
  *           type: boolean
+ *           description: Indica si el cliente está listo para usar
+ *           example: true
  *         number:
  *           type: string
+ *           description: Número del cliente
+ *           example: "5931234567890"
+ *     AuthenticatedAccount:
+ *       type: object
+ *       properties:
+ *         number:
+ *           type: string
+ *           description: Número de la cuenta autenticada
+ *           example: "5931234567890"
+ *         display_name:
+ *           type: string
+ *           description: Nombre mostrado de la cuenta
+ *           example: "Mi WhatsApp Business"
+ *         displayName:
+ *           type: string
+ *           description: Nombre alternativo mostrado
+ *           example: "Mi WhatsApp Business"
+ *         status:
+ *           type: string
+ *           description: Estado de la cuenta
+ *           example: "authenticated"
+ *         last_activity:
+ *           type: integer
+ *           format: int64
+ *           description: Timestamp de última actividad
+ *           example: 1640995200000
+ *         lastActivity:
+ *           type: integer
+ *           format: int64
+ *           description: Timestamp alternativo de última actividad
+ *           example: 1640995200000
+ *     ReconnectionMetrics:
+ *       type: object
+ *       properties:
+ *         activeReconnections:
+ *           type: integer
+ *           description: Reconexiones activas
+ *           example: 2
+ *         queuedReconnections:
+ *           type: integer
+ *           description: Reconexiones en cola
+ *           example: 1
+ *         successRate:
+ *           type: number
+ *           description: Tasa de éxito de reconexión
+ *           example: 0.85
+ *         totalAttempts:
+ *           type: integer
+ *           description: Total de intentos de reconexión
+ *           example: 23
+ *     ServiceMetrics:
+ *       type: object
+ *       properties:
+ *         totalOperations:
+ *           type: integer
+ *           description: Total de operaciones realizadas
+ *           example: 1250
+ *         successfulOperations:
+ *           type: integer
+ *           description: Operaciones exitosas
+ *           example: 1180
+ *         failedOperations:
+ *           type: integer
+ *           description: Operaciones fallidas
+ *           example: 70
+ *         averageResponseTime:
+ *           type: number
+ *           description: Tiempo promedio de respuesta en ms
+ *           example: 185.3
+ *         lastOperationTime:
+ *           type: integer
+ *           nullable: true
+ *           format: int64
+ *           description: Timestamp de la última operación
+ *           example: 1640995200000
+ *         cacheSize:
+ *           type: integer
+ *           description: Tamaño del caché
+ *           example: 45
+ *         initialized:
+ *           type: boolean
+ *           description: Si el servicio está inicializado
+ *           example: true
+ *         isShuttingDown:
+ *           type: boolean
+ *           description: Si el servicio se está cerrando
+ *           example: false
+ *     MonitoringMetrics:
+ *       type: object
+ *       properties:
+ *         totalClients:
+ *           type: integer
+ *           description: Total de clientes monitoreados
+ *           example: 8
+ *         healthyClients:
+ *           type: integer
+ *           description: Clientes saludables
+ *           example: 7
+ *         unhealthyClients:
+ *           type: integer
+ *           description: Clientes no saludables
+ *           example: 1
+ *         averageUptime:
+ *           type: integer
+ *           description: Tiempo promedio de actividad en ms
+ *           example: 3600000
+ *     ClientMonitoring:
+ *       type: object
+ *       properties:
+ *         lastSeen:
+ *           type: integer
+ *           format: int64
+ *           description: Timestamp última vez visto
+ *           example: 1640995200000
+ *         consecutiveFailures:
+ *           type: integer
+ *           description: Fallos consecutivos
+ *           example: 0
+ *         lastHealthCheck:
+ *           type: integer
+ *           format: int64
+ *           description: Timestamp último health check
+ *           example: 1640995200000
+ *         createdAt:
+ *           type: integer
+ *           format: int64
+ *           description: Timestamp de creación
+ *           example: 1640990000000
+ *     ClientMonitoringStatus:
+ *       type: object
+ *       properties:
+ *         number:
+ *           type: string
+ *           description: Número del cliente
+ *           example: "5931234567890"
+ *         lastSeen:
+ *           type: integer
+ *           format: int64
+ *           example: 1640995200000
+ *         consecutiveFailures:
+ *           type: integer
+ *           example: 0
+ *         lastHealthCheck:
+ *           type: integer
+ *           format: int64
+ *           example: 1640995200000
  */
 
 const BaseWhatsAppService = require('../services/api/baseService');
@@ -61,6 +211,7 @@ class ClientController {
      *   post:
      *     tags: [Clients]
      *     summary: Agregar nuevo cliente WhatsApp
+     *     description: Crea un nuevo cliente WhatsApp. Verifica si ya existe antes de crear uno nuevo.
      *     operationId: addClient
      *     requestBody:
      *       required: true
@@ -74,13 +225,13 @@ class ClientController {
      *               number:
      *                 type: string
      *                 pattern: '^[1-9][0-9]{7,14}$'
-     *                 description: Número de teléfono del cliente
-     *                 example: "1234567890123"
+     *                 description: Número de teléfono del cliente (solo dígitos, sin símbolos)
+     *                 example: "5931234567890"
      *           example:
-     *             number: "1234567890123"
+     *             number: "5931234567890"
      *     responses:
      *       200:
-     *         description: Cliente agregado exitosamente
+     *         description: Cliente agregado exitosamente o ya existía
      *         content:
      *           application/json:
      *             schema:
@@ -120,6 +271,7 @@ class ClientController {
      *   post:
      *     tags: [Clients]
      *     summary: Eliminar cliente WhatsApp
+     *     description: Elimina un cliente WhatsApp existente. Verifica que el cliente exista antes de eliminarlo.
      *     operationId: removeClient
      *     requestBody:
      *       required: true
@@ -134,9 +286,9 @@ class ClientController {
      *                 type: string
      *                 pattern: '^[1-9][0-9]{7,14}$'
      *                 description: Número de teléfono del cliente a eliminar
-     *                 example: "1234567890123"
+     *                 example: "5931234567890"
      *           example:
-     *             number: "1234567890123"
+     *             number: "5931234567890"
      *     responses:
      *       200:
      *         description: Cliente eliminado exitosamente
@@ -182,6 +334,7 @@ class ClientController {
      *   get:
      *     tags: [Clients]
      *     summary: Obtener código QR para autenticación
+     *     description: Obtiene el código QR para autenticar un cliente WhatsApp. Si no está disponible, puede refrescar automáticamente el cliente.
      *     operationId: getQrCode
      *     parameters:
      *       - in: path
@@ -190,8 +343,8 @@ class ClientController {
      *         schema:
      *           type: string
      *           pattern: '^[1-9][0-9]{7,14}$'
-     *         description: Número del cliente WhatsApp
-     *         example: "1234567890123"
+     *         description: Número del cliente WhatsApp (sin símbolos, solo dígitos)
+     *         example: "5931234567890"
      *     responses:
      *       200:
      *         description: QR code generado exitosamente
@@ -207,10 +360,10 @@ class ClientController {
      *                       properties:
      *                         qr:
      *                           type: string
-     *                           description: Código QR en formato base64
-     *                           example: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+     *                           description: Código QR listo para mostrar al usuario
+     *                           example: "2@abc123def456..."
      *       202:
-     *         description: Cliente en proceso de inicialización
+     *         description: Cliente en proceso de inicialización o reconexión
      *         content:
      *           application/json:
      *             schema:
@@ -223,9 +376,11 @@ class ClientController {
      *                       properties:
      *                         refreshed:
      *                           type: boolean
+     *                           description: Indica si se refrescó el cliente
      *                           example: true
      *                         reconnecting:
      *                           type: boolean
+     *                           description: Indica si está en proceso de reconexión
      *                           example: false
      *       404:
      *         $ref: '#/components/responses/NotFound'
@@ -307,6 +462,7 @@ class ClientController {
      *   get:
      *     tags: [Clients]
      *     summary: Verificar estado de autenticación del cliente
+     *     description: Verifica únicamente si el cliente está autenticado con WhatsApp
      *     operationId: getClientStatus
      *     parameters:
      *       - in: path
@@ -316,7 +472,7 @@ class ClientController {
      *           type: string
      *           pattern: '^[1-9][0-9]{7,14}$'
      *         description: Número del cliente WhatsApp
-     *         example: "1234567890123"
+     *         example: "5931234567890"
      *     responses:
      *       200:
      *         description: Estado de autenticación obtenido exitosamente
@@ -337,7 +493,7 @@ class ClientController {
      *       400:
      *         $ref: '#/components/responses/BadRequest'
      *       500:
-     *         description: Error interno del servidor
+     *         description: Error interno del servidor (devuelve false por defecto)
      *         content:
      *           application/json:
      *             schema:
@@ -356,6 +512,7 @@ class ClientController {
      *   get:
      *     tags: [Clients]
      *     summary: Verificar estado de conexión detallado
+     *     description: Obtiene estado completo de autenticación y disponibilidad del cliente
      *     operationId: getConnectionStatus
      *     parameters:
      *       - in: path
@@ -365,7 +522,7 @@ class ClientController {
      *           type: string
      *           pattern: '^[1-9][0-9]{7,14}$'
      *         description: Número del cliente WhatsApp
-     *         example: "1234567890123"
+     *         example: "5931234567890"
      *     responses:
      *       200:
      *         description: Estado de conexión obtenido exitosamente
@@ -381,7 +538,7 @@ class ClientController {
      *       400:
      *         $ref: '#/components/responses/BadRequest'
      *       500:
-     *         description: Error interno del servidor
+     *         description: Error interno del servidor (devuelve estados por defecto)
      *         content:
      *           application/json:
      *             schema:
@@ -404,6 +561,7 @@ class ClientController {
      *   get:
      *     tags: [Clients]
      *     summary: Obtener todas las cuentas autenticadas
+     *     description: Retorna información de todas las cuentas WhatsApp autenticadas y activas
      *     operationId: getAllAuthenticatedAccountsInfo
      *     responses:
      *       200:
@@ -423,7 +581,7 @@ class ClientController {
      *                           items:
      *                             $ref: '#/components/schemas/AuthenticatedAccount'
      *       500:
-     *         description: Error interno del servidor
+     *         description: Error interno del servidor (devuelve array vacío)
      *         content:
      *           application/json:
      *             schema:
@@ -441,6 +599,7 @@ class ClientController {
      *   get:
      *     tags: [Clients]
      *     summary: Obtener métricas detalladas de reconexión
+     *     description: Proporciona métricas completas del sistema incluyendo reconexiones, servicio y monitoreo
      *     operationId: getReconnectionMetrics
      *     responses:
      *       200:
@@ -485,10 +644,11 @@ class ClientController {
 
     /**
      * @swagger
-     * /api/health/{number}:
+     *   /api/health/{number}:
      *   post:
      *     tags: [Clients]
-     *     summary: Forzar verificación de salud para un cliente específico
+     *     summary: Forzar verificación de salud para cliente(s)
+     *     description: Ejecuta health check para un cliente específico o todos los clientes. Incluye validación de intervalos mínimos para evitar spam.
      *     operationId: forceHealthCheck
      *     parameters:
      *       - in: path
@@ -498,7 +658,7 @@ class ClientController {
      *           type: string
      *           pattern: '^[1-9][0-9]{7,14}$|^all$'
      *         description: Número del cliente WhatsApp o 'all' para todos los clientes
-     *         example: "1234567890123"
+     *         example: "5931234567890"
      *     responses:
      *       200:
      *         description: Verificación de salud completada exitosamente
@@ -514,11 +674,11 @@ class ClientController {
      *                       properties:
      *                         client:
      *                           type: string
-     *                           description: Número del cliente verificado
-     *                           example: "1234567890123"
+     *                           description: Número del cliente verificado (para cliente específico)
+     *                           example: "5931234567890"
      *                         clients:
      *                           type: integer
-     *                           description: Número de clientes verificados (cuando es 'all')
+     *                           description: Número de clientes verificados (para 'all')
      *                           example: 5
      *                         monitoring:
      *                           oneOf:
@@ -526,9 +686,10 @@ class ClientController {
      *                             - type: array
      *                               items:
      *                                 $ref: '#/components/schemas/ClientMonitoringStatus'
+     *                           description: Información de monitoreo resultante
      *                         message:
      *                           type: string
-     *                           example: "Health check completed for client 1234567890123"
+     *                           example: "Health check completed for client 5931234567890"
      *                         timestamp:
      *                           type: integer
      *                           format: int64
