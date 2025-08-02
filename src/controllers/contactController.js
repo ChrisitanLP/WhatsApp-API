@@ -7,13 +7,29 @@
  *       properties:
  *         id:
  *           type: string
+ *           description: ID serializado del contacto
+ *           example: "1234567890@c.us"
+ *         phone_number:
+ *           type: string
+ *           description: Número de teléfono del contacto
+ *           example: "1234567890"
  *         name:
  *           type: string
- *         number:
- *           type: string
+ *           description: Nombre del contacto
+ *           example: "Juan Pérez"
  *         profilePicUrl:
  *           type: string
  *           nullable: true
+ *           description: URL de la foto de perfil del contacto
+ *           example: "https://example.com/profile.jpg"
+ *         clientNumber:
+ *           type: string
+ *           description: Número del cliente WhatsApp al que pertenece
+ *           example: "5931234567890"
+ *         clientId:
+ *           type: string
+ *           description: ID interno del cliente
+ *           example: "client_123"
  *     SaveContactRequest:
  *       type: object
  *       required:
@@ -24,12 +40,97 @@
  *         clientNumber:
  *           type: string
  *           description: Número del cliente WhatsApp
+ *           example: "5931234567890"
  *         contactNumber:
  *           type: string
- *           description: Número del contacto a guardar
+ *           description: Número del contacto a guardar (sin @c.us)
+ *           example: "593987654321"
  *         contactName:
  *           type: string
  *           description: Nombre del contacto
+ *           example: "María García"
+ *     ControllerMetrics:
+ *       type: object
+ *       properties:
+ *         totalRequests:
+ *           type: integer
+ *           description: Total de peticiones procesadas
+ *           example: 150
+ *         successfulRequests:
+ *           type: integer
+ *           description: Peticiones exitosas
+ *           example: 142
+ *         failedRequests:
+ *           type: integer
+ *           description: Peticiones fallidas
+ *           example: 8
+ *         averageResponseTime:
+ *           type: number
+ *           description: Tiempo promedio de respuesta en ms
+ *           example: 250.5
+ *         lastRequestTime:
+ *           type: integer
+ *           nullable: true
+ *           format: int64
+ *           description: Timestamp de la última petición
+ *           example: 1640995200000
+ *     ContactServiceMetrics:
+ *       type: object
+ *       properties:
+ *         totalFetches:
+ *           type: integer
+ *           description: Total de consultas de contactos
+ *           example: 45
+ *         cacheHits:
+ *           type: integer
+ *           description: Aciertos de caché
+ *           example: 32
+ *         cacheMisses:
+ *           type: integer
+ *           description: Fallos de caché
+ *           example: 13
+ *         averageFetchTime:
+ *           type: number
+ *           description: Tiempo promedio de consulta en ms
+ *           example: 180.7
+ *         lastFetchTime:
+ *           type: integer
+ *           nullable: true
+ *           format: int64
+ *           description: Timestamp de la última consulta
+ *           example: 1640995200000
+ *         cacheSize:
+ *           type: integer
+ *           description: Tamaño actual del caché
+ *           example: 15
+ *         circuitBreakerState:
+ *           type: object
+ *           description: Estado del circuit breaker
+ *         cacheHitRate:
+ *           type: string
+ *           description: Tasa de aciertos del caché
+ *           example: "71.11%"
+ *     HealthStatus:
+ *       type: object
+ *       properties:
+ *         status:
+ *           type: string
+ *           enum: [healthy, degraded, unhealthy]
+ *           description: Estado de salud del servicio
+ *           example: "healthy"
+ *         timestamp:
+ *           type: integer
+ *           format: int64
+ *           description: Timestamp de la verificación
+ *           example: 1640995200000
+ *         metrics:
+ *           $ref: '#/components/schemas/ContactServiceMetrics'
+ *         issues:
+ *           type: array
+ *           items:
+ *             type: string
+ *           description: Lista de problemas detectados
+ *           example: []
  */
 
 const ContactService = require('../services/api/contactService');
@@ -117,6 +218,7 @@ class ContactController {
      *   get:
      *     tags: [Contacts]
      *     summary: Obtener lista de contactos con paginación
+     *     description: Obtiene contactos de todos los clientes autenticados, filtrando solo contactos individuales (no grupos) que estén guardados
      *     operationId: getContacts
      *     parameters:
      *       - in: query
@@ -125,7 +227,7 @@ class ContactController {
      *           type: integer
      *           minimum: 1
      *           default: 1
-     *         description: Número de página para la paginación
+     *         description: Número de página para la paginación (30 contactos por página)
      *         example: 1
      *     responses:
      *       200:
@@ -144,22 +246,23 @@ class ContactController {
      *                           type: array
      *                           items:
      *                             $ref: '#/components/schemas/Contact'
+     *                           description: Lista de contactos paginados y ordenados alfabéticamente
      *                         count:
      *                           type: integer
      *                           description: Número de contactos en la página actual
      *                           example: 25
      *                         page:
      *                           type: integer
-     *                           description: Página actual
+     *                           description: Página actual solicitada
      *                           example: 1
      *                         requestId:
      *                           type: string
-     *                           description: ID único de la petición
-     *                           example: "contacts_1234567890_abc123def"
+     *                           description: ID único de la petición para tracking
+     *                           example: "contacts_1640995200000_abc123def"
      *       400:
      *         $ref: '#/components/responses/BadRequest'
      *       408:
-     *         description: Timeout de la petición
+     *         description: Timeout de la petición (30 segundos)
      *         content:
      *           application/json:
      *             schema:
@@ -283,6 +386,7 @@ class ContactController {
      *   post:
      *     tags: [Contacts]
      *     summary: Guardar nuevo contacto en WhatsApp
+     *     description: Crea un contacto en el cliente WhatsApp especificado. Verifica si el contacto ya existe antes de crearlo.
      *     operationId: saveContact
      *     requestBody:
      *       required: true
@@ -291,12 +395,12 @@ class ContactController {
      *           schema:
      *             $ref: '#/components/schemas/SaveContactRequest'
      *           example:
-     *             clientNumber: "1234567890"
-     *             contactNumber: "0987654321"
+     *             clientNumber: "5931234567890"
+     *             contactNumber: "593987654321"
      *             contactName: "Juan Pérez"
      *     responses:
      *       200:
-     *         description: Contacto guardado exitosamente
+     *         description: Contacto guardado exitosamente o ya existía
      *         content:
      *           application/json:
      *             schema:
@@ -310,7 +414,7 @@ class ContactController {
      *                         clientNumber:
      *                           type: string
      *                           description: Número del cliente WhatsApp
-     *                           example: "1234567890"
+     *                           example: "5931234567890"
      *                         contactName:
      *                           type: string
      *                           description: Nombre del contacto guardado
@@ -318,7 +422,11 @@ class ContactController {
      *                         requestId:
      *                           type: string
      *                           description: ID único de la petición
-     *                           example: "save_contact_1234567890_xyz789"
+     *                           example: "save_contact_1640995200000_xyz789"
+     *                         message:
+     *                           type: string
+     *                           description: Mensaje adicional si el contacto ya existía
+     *                           example: "Contact already exists"
      *       400:
      *         $ref: '#/components/responses/BadRequest' 
      *       404:
@@ -336,7 +444,7 @@ class ContactController {
      *                         requestId:
      *                           type: string
      *       408:
-     *         description: Timeout al guardar contacto
+     *         description: Timeout al guardar contacto (20 segundos)
      *         content:
      *           application/json:
      *             schema:

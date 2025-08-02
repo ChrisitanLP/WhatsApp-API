@@ -96,36 +96,101 @@
  *     MessageInfoResponse:
  *       type: object
  *       properties:
- *         messageInfo:
+ *         success:
+ *           type: boolean
+ *           example: true
+ *         message:
+ *           type: string
+ *           example: "Operation completed successfully"
+ *         data:
  *           type: object
  *           properties:
- *             id:
- *               type: string
- *               description: ID del mensaje
- *             body:
- *               type: string
- *               description: Contenido del mensaje
- *             type:
- *               type: string
- *               description: Tipo de mensaje
- *             timestamp:
- *               type: integer
- *               description: Timestamp del mensaje
- *             from:
- *               type: string
- *               description: Remitente del mensaje
- *             to:
- *               type: string
- *               description: Destinatario del mensaje
- *             hasMedia:
- *               type: boolean
- *               description: Si el mensaje tiene media
- *             isStarred:
- *               type: boolean
- *               description: Si el mensaje está marcado como importante
- *             isForwarded:
- *               type: boolean
- *               description: Si el mensaje es reenviado
+ *             messageInfo:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                   description: ID del mensaje
+ *                 body:
+ *                   type: string
+ *                   description: Contenido del mensaje
+ *                 type:
+ *                   type: string
+ *                   description: Tipo de mensaje
+ *                 timestamp:
+ *                   type: integer
+ *                   description: Timestamp del mensaje
+ *                 from:
+ *                   type: string
+ *                   description: Remitente del mensaje
+ *                 to:
+ *                   type: string
+ *                   description: Destinatario del mensaje
+ *                 hasMedia:
+ *                   type: boolean
+ *                   description: Si el mensaje tiene media
+ *                 isStarred:
+ *                   type: boolean
+ *                   description: Si el mensaje está marcado como importante
+ *                 isForwarded:
+ *                   type: boolean
+ *                   description: Si el mensaje es reenviado
+ *     MessageRequest:
+ *       type: object
+ *       required:
+ *         - clientId
+ *         - tel
+ *         - mensaje
+ *       properties:
+ *         clientId:
+ *           type: string
+ *           description: ID del cliente de WhatsApp
+ *         tel:
+ *           type: string
+ *           description: Número de teléfono o ID del chat
+ *         mensaje:
+ *           type: string
+ *           description: Contenido del mensaje
+ *     GroupMessageRequest:
+ *       type: object
+ *       required:
+ *         - clientId
+ *         - groupId
+ *         - mensaje
+ *       properties:
+ *         clientId:
+ *           type: string
+ *           description: ID del cliente de WhatsApp
+ *         groupId:
+ *           type: string
+ *           description: ID del grupo
+ *         mensaje:
+ *           type: string
+ *           description: Contenido del mensaje
+ *     ReplyMessageRequest:
+ *       type: object
+ *       required:
+ *         - clientId
+ *         - tel
+ *         - messageId
+ *         - reply
+ *       properties:
+ *         clientId:
+ *           type: string
+ *           description: ID del cliente de WhatsApp
+ *         tel:
+ *           type: string
+ *           description: Número de teléfono o ID del chat
+ *         messageId:
+ *           type: string
+ *           description: ID del mensaje a responder
+ *         reply:
+ *           type: string
+ *           description: Contenido de la respuesta
+ *         isGroup:
+ *           type: boolean
+ *           default: false
+ *           description: Indica si es un chat de grupo
  */
 
 const MessageService = require('../services/api/messageService');
@@ -222,7 +287,7 @@ class MessageController {
     /**
      * @swagger
      * /api/deleteMessage:
-     *   post:
+     *   delete:
      *     tags: [Messages]
      *     summary: Eliminar mensaje
      *     operationId: deleteMessage
@@ -284,7 +349,7 @@ class MessageController {
     /**
      * @swagger
      * /api/markMessageAsImportant:
-     *   post:
+     *   put:
      *     tags: [Messages]
      *     summary: Marcar mensaje como importante
      *     operationId: markMessageAsImportant
@@ -315,7 +380,7 @@ class MessageController {
     /**
      * @swagger
      * /api/unmarkMessageAsImportant:
-     *   post:
+     *   put:
      *     tags: [Messages]
      *     summary: Desmarcar mensaje como importante
      *     operationId: unmarkMessageAsImportant
@@ -346,7 +411,7 @@ class MessageController {
     /**
      * @swagger
      * /api/editMessage:
-     *   post:
+     *   put:
      *     tags: [Messages]
      *     summary: Editar mensaje
      *     operationId: editMessage
@@ -407,17 +472,36 @@ class MessageController {
 
     /**
      * @swagger
-     * /api/getMessageInfo:
-     *   post:
+     * /api/getMessageInfo/{clientId}/{tel}/{messageId}:
+     *   get:
      *     tags: [Messages]
      *     summary: Obtener información del mensaje
      *     operationId: getMessageInfo
-     *     requestBody:
-     *       required: true
-     *       content:
-     *         application/json:
-     *           schema:
-     *             $ref: '#/components/schemas/MessageActionRequest'
+     *     parameters:
+     *       - name: clientId
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: ID del cliente de WhatsApp
+     *       - name: tel
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: Número de teléfono o ID del chat
+     *       - name: messageId
+     *         in: path
+     *         required: true
+     *         schema:
+     *           type: string
+     *         description: ID del mensaje
+     *       - name: isGroup
+     *         in: query
+     *         schema:
+     *           type: boolean
+     *           default: false
+     *         description: Indica si es un chat de grupo
      *     responses:
      *       200:
      *         description: Información del mensaje obtenida exitosamente
