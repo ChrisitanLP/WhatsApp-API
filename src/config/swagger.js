@@ -5,26 +5,47 @@ const path = require('path');
 const swaggerDefinition = {
     openapi: '3.0.0',
     info: {
-        title: 'WhatsApp API',
+        title: 'WhatsApp Business API Integration',
         version: '1.2.1',
         description: `
-            API RESTful desarrollada para la integración entre WhatsApp Web y el sistema ERP Odoo. 
-            Permite la gestión centralizada de sesiones de WhatsApp, envío y recepción de mensajes, administración de contactos, archivos multimedia y operaciones relacionadas con clientes, todo desde un único entorno de backend.
+            Esta API RESTful proporciona una integración escalable entre WhatsApp Web y sistemas ERP empresariales, específicamente diseñada para Odoo.
 
-            Esta API ha sido diseñada con un enfoque modular, escalable y orientado a la trazabilidad de las comunicaciones digitales empresariales. Provee endpoints bien documentados que facilitan la automatización de tareas de mensajería, soporte al cliente, seguimiento comercial y sincronización con módulos internos de Odoo.
+            Características Principales:
+                * Gestión de Sesiones
+                    - Autenticación mediante códigos QR
+                    - Manejo automático de reconexiones
+                    - Monitoreo en tiempo real del estado de conexión
+                    - Soporte para múltiples cuentas WhatsApp simultaneas
 
-            Entre sus funcionalidades clave se incluyen:
+                * Mensajería Avanzada
+                    - Envío de mensajes de texto, multimedia y documentos
+                    - Soporte para mensajes grupales y menciones
+                    - Reenvío, respuesta y edición de mensajes
+                    - Gestión de estados de lectura y mensajes importantes
 
-            - Registro y control de sesiones de WhatsApp usando 'whatsapp-web.js'.
-            - Envío de mensajes de texto, imágenes, archivos y stickers.
-            - Gestión de chats activos, contactos y conversaciones.
-            - Integración con catálogos de productos y respuestas automáticas.
-            - Control de reconexión de sesiones y estado en tiempo real.
-            - Métricas para supervisión del comportamiento de uso.
+                * Administración de Contactos
+                    - Sincronización automática de contactos
+                    - Gestión de grupos y participantes
+                    - Búsqueda y filtrado avanzado
+                    - Integración con libreta de direcciones empresarial
 
-            Todos los endpoints están documentados utilizando el estándar OpenAPI 3.0, lo que permite su exploración y prueba directa desde esta interfaz. Esta documentación está pensada tanto para desarrolladores como para equipos técnicos que deseen extender o integrar nuevas funcionalidades de mensajería en su infraestructura.
+                * Archivos Multimedia
+                    - Envío de imágenes, videos, audio y documentos
+                    - Soporte for stickers y emojis animados
+                    - Gestión automática de formatos y compresión
+                    - Validación de tamaños y tipos de archivo
 
-            Uso recomendado: familiarizarse con los esquemas ('schemas') definidos en la parte inferior, ya que representan las estructuras de datos comunes en los distintos endpoints.
+            Seguridad y Cumplimiento:
+                - Validación estricta de parámetros de entrada
+                - Sanitización automática de datos
+                - Logging de auditoría completo
+                - Cumplimiento con políticas de WhatsApp Business
+
+            Rate Limiting y Políticas:
+                - Límite general: 1000 requests/hora por IP
+                - Endpoints críticos: 100 requests/hora
+                - Timeout: 30 segundos por operación
+                - Retry Policy: 3 intentos con backoff exponencial
             `
     },
     servers: [
@@ -38,6 +59,7 @@ const swaggerDefinition = {
         // Esquemas comunes
             ApiResponse: {
                 type: 'object',
+                description: 'Estructura estándar de respuesta de la API - Utilizada en todos los endpoints',
                 properties: {
                     success: {
                         type: 'boolean',
@@ -46,178 +68,224 @@ const swaggerDefinition = {
                     },
                     message: {
                         type: 'string',
-                        description: 'Mensaje descriptivo de la respuesta',
+                        description: 'Mensaje descriptivo del resultado de la operación',
                         example: 'Operación completada exitosamente'
                     },
                     data: {
                         type: 'object',
-                        description: 'Datos de respuesta (opcional)',
+                        description: 'Datos específicos de la respuesta (estructura variable según endpoint)',
+                        nullable: true,
                         example: {}
                     },
                     error: {
                         type: 'string',
-                        description: 'Mensaje de error (si aplica)',
+                        description: 'Descripción detallada del error (solo presente cuando success=false)',
+                        nullable: true,
                         example: null
                     },
                     requestId: {
                         type: 'string',
-                        description: 'ID único de la petición para seguimiento',
-                        example: '1640995200000_abc123def'
+                        description: 'Identificador único de la petición para trazabilidad y debugging',
+                        pattern: '^[a-zA-Z0-9_]+_[0-9]{13}_[a-zA-Z0-9]+$',
+                        example: 'client_add_1640995200000_abc123def'
                     },
                     timestamp: {
                         type: 'string',
                         format: 'date-time',
-                        description: 'Marca temporal de la respuesta',
-                        example: '2024-01-01T12:00:00.000Z'
+                        description: 'Marca temporal ISO 8601 del momento de procesamiento',
+                        example: '2024-01-15T10:30:45.123Z'
                     }
                 },
-                required: ['success', 'message']
+                required: ['success', 'message', 'requestId', 'timestamp'],
+                additionalProperties: false
             },
             ErrorResponse: {
                 type: 'object',
+                description: 'Estructura estándar para respuestas de error de la API',
                 properties: {
                     success: {
                         type: 'boolean',
+                        enum: [false],
+                        description: 'Siempre false para errores',
                         example: false
                     },
                     message: {
                         type: 'string',
-                        description: 'Mensaje de error'
+                        description: 'Mensaje de error legible para el usuario',
+                        example: 'Cliente WhatsApp no encontrado o no autenticado'
                     },
                     error: {
                         type: 'string',
-                        description: 'Detalles del error'
+                        description: 'Descripción técnica detallada del error',
+                        example: 'Client with number 5931234567890 is not authenticated or ready'
+                    },
+                    requestId: {
+                        type: 'string',
+                        description: 'ID único para rastrear el error en logs',
+                        example: 'error_1640995200000_xyz789'
+                    },
+                    timestamp: {
+                        type: 'string',
+                        format: 'date-time',
+                        description: 'Momento exacto en que ocurrió el error',
+                        example: '2024-01-15T10:31:15.789Z'
+                    },
+                    details: {
+                        type: 'object',
+                        description: 'Información adicional del error (solo en modo desarrollo)',
+                        nullable: true,
+                        example: null
                     }
-                }
+                },
+                required: ['success', 'message', 'error', 'requestId', 'timestamp'],
+                additionalProperties: false
             },
             // Esquemas específicos de WhatsApp
             ClientInfo: {
                 type: 'object',
-                description: 'Información completa del cliente WhatsApp',
+                description: 'Información completa del estado de un cliente WhatsApp autenticado',
                 properties: {
                     number: {
                         type: 'string',
-                        description: 'Número de teléfono del cliente WhatsApp',
+                        description: 'Número de teléfono del cliente WhatsApp (formato internacional sin símbolos)',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '1234567890'
+                        example: '5931234567890'
                     },
                     isAuthenticated: {
                         type: 'boolean',
-                        description: 'Estado de autenticación del cliente',
+                        description: 'Estado de autenticación con WhatsApp Web',
                         example: true
                     },
                     isReady: {
                         type: 'boolean',
-                        description: 'Estado de disponibilidad para envío de mensajes',
+                        description: 'Indica si el cliente está listo para enviar/recibir mensajes',
                         example: true
                     },
                     lastActivity: {
                         type: 'string',
                         format: 'date-time',
-                        description: 'Última actividad registrada',
-                        example: '2024-01-01T12:00:00.000Z'
+                        description: 'Timestamp de la última actividad registrada del cliente',
+                        example: '2024-01-15T10:25:30.456Z'
                     },
                     profileName: {
                         type: 'string',
-                        description: 'Nombre del perfil de WhatsApp',
-                        example: 'Mi Empresa'
+                        description: 'Nombre del perfil de WhatsApp Business',
+                        maxLength: 100,
+                        example: 'Mi Empresa S.A.'
+                    },
+                    display_name: {
+                        type: 'string',
+                        description: 'Nombre mostrado alternativo (alias interno)',
+                        maxLength: 100,
+                        example: 'Empresa Principal'
+                    },
+                    status: {
+                        type: 'string',
+                        enum: ['authenticated', 'connecting', 'disconnected', 'initializing'],
+                        description: 'Estado actual de la conexión',
+                        example: 'authenticated'
                     }
                 },
-                required: ['number', 'isAuthenticated', 'isReady']
+                required: ['number', 'isAuthenticated', 'isReady'],
+                additionalProperties: false
             },
             MessageData: {
                 type: 'object',
-                description: 'Estructura para envío de mensajes de texto',
+                description: 'Estructura requerida para envío de mensajes de texto a contactos individuales',
                 properties: {
                     clientId: {
                         type: 'string',
-                        description: 'Número del cliente WhatsApp que enviará el mensaje',
+                        description: 'Número del cliente WhatsApp emisor (debe estar autenticado)',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '1234567890'
+                        example: '5931234567890'
                     },
                     tel: {
                         type: 'string',
-                        description: 'Número de teléfono destinatario (con código de país)',
+                        description: 'Número destinatario en formato internacional (sin @c.us)',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '521234567890'
+                        example: '593987654321'
                     },
                     mensaje: {
                         type: 'string',
-                        description: 'Contenido del mensaje de texto',
+                        description: 'Contenido del mensaje de texto (emojis soportados)',
                         minLength: 1,
                         maxLength: 65536,
-                        example: 'Hola, este es un mensaje de prueba desde la API'
+                        example: 'Hola, este es un mensaje desde nuestra API empresarial 👋'
                     },
                     isGroup: {
                         type: 'boolean',
-                        description: 'Indica si el destinatario es un grupo',
+                        description: 'DEBE ser false para mensajes individuales (usar sendGroupMessage para grupos)',
                         default: false,
                         example: false
                     }
                 },
-                required: ['clientId', 'tel', 'mensaje']
+                required: ['clientId', 'tel', 'mensaje'],
+                additionalProperties: false
             },
             ContactData: {
                 type: 'object',
-                description: 'Información para guardar un contacto',
+                description: 'Información requerida para guardar un nuevo contacto en WhatsApp',
                 properties: {
                     clientNumber: {
                         type: 'string',
-                        description: 'Número del cliente WhatsApp',
+                        description: 'Número del cliente WhatsApp donde se guardará el contacto',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '1234567890'
+                        example: '5931234567890'
                     },
                     contactNumber: {
                         type: 'string',
-                        description: 'Número del contacto a guardar',
+                        description: 'Número del contacto a guardar (formato internacional sin @c.us)',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '521234567890'
+                        example: '593987654321'
                     },
                     contactName: {
                         type: 'string',
-                        description: 'Nombre del contacto',
+                        description: 'Nombre descriptivo del contacto (será visible en WhatsApp)',
                         minLength: 1,
                         maxLength: 100,
-                        example: 'Juan Pérez'
+                        example: 'Juan Pérez - Cliente VIP'
                     }
                 },
-                required: ['clientNumber', 'contactNumber', 'contactName']
+                required: ['clientNumber', 'contactNumber', 'contactName'],
+                additionalProperties: false
             },
             MediaData: {
                 type: 'object',
-                description: 'Estructura para envío de archivos multimedia',
+                description: 'Configuración para envío de archivos multimedia (imágenes, videos, documentos)',
                 properties: {
                     clientId: {
                         type: 'string',
-                        description: 'ID del cliente WhatsApp',
+                        description: 'Número del cliente WhatsApp emisor',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '1234567890'
+                        example: '5931234567890'
                     },
                     tel: {
                         type: 'string',
-                        description: 'Número destinatario',
+                        description: 'Número destinatario (sin @c.us para individuales)',
                         pattern: '^[1-9][0-9]{7,14}$',
-                        example: '521234567890'
+                        example: '593987654321'
                     },
                     filePath: {
                         type: 'string',
-                        description: 'Ruta del archivo multimedia o URL',
-                        example: '/media/imagen.jpg'
+                        description: 'Ruta absoluta del archivo en el servidor (debe ser accesible)',
+                        pattern: '^[/\\\\].*\\.(jpg|jpeg|png|gif|webp|pdf|doc|docx|mp4|mp3|wav)$',
+                        example: '/var/media/uploads/documento_importante.pdf'
                     },
                     caption: {
                         type: 'string',
-                        description: 'Texto descriptivo del archivo (opcional)',
+                        description: 'Texto descriptivo opcional para acompañar el archivo',
                         maxLength: 1024,
-                        example: 'Esta es una imagen de ejemplo'
+                        example: 'Documento adjunto solicitado - Confidencial'
                     },
                     isGroup: {
                         type: 'boolean',
-                        description: 'Si es para un grupo',
+                        description: 'true si el destinatario es un grupo',
                         default: false,
                         example: false
                     }
                 },
-                required: ['clientId', 'tel', 'filePath']
+                required: ['clientId', 'tel', 'filePath'],
+                additionalProperties: false
             }
         },
         responses: {
@@ -536,181 +604,409 @@ const setupSwaggerMiddleware = (app) => {
             operationsSorter: 'alpha'
         },
         customCss: `
+            :root {
+                --primary-color: #1abc9c;
+                --primary-dark: #16a085;
+                --secondary-color: #3498db;
+                --accent-color: #2c3e50;
+                --background-light: #f8f9fa;
+                --background-dark: #2c3e50;
+                --text-primary: #2c3e50;
+                --text-secondary: #5a6c7d;
+                --border-color: #e0e6ed;
+                --success-color: #27ae60;
+                --warning-color: #f39c12;
+                --error-color: #e74c3c;
+                --shadow-sm: 0 2px 4px rgba(0,0,0,0.1);
+                --shadow-md: 0 4px 8px rgba(0,0,0,0.12);
+                --shadow-lg: 0 8px 16px rgba(0,0,0,0.15);
+                --radius-sm: 4px;
+                --radius-md: 8px;
+                --radius-lg: 12px;
+            }
+
             /* Reset y base styles */
             .swagger-ui {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
                 line-height: 1.6;
+                color: var(--text-primary);
             }
 
             /* Header personalizado */
             .swagger-ui .topbar {
-                background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
-                border-bottom: 2px solid #1abc9c;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                background: linear-gradient(135deg, var(--background-dark) 0%, #34495e 50%, var(--primary-color) 100%);
+                border-bottom: 3px solid var(--primary-color);
+                box-shadow: var(--shadow-md);
+                padding: 1rem 0;
             }
             
             .swagger-ui .topbar .download-url-wrapper { 
                 display: none; 
             }
 
+            .swagger-ui .topbar-wrapper .link {
+                color: white;
+                font-weight: 600;
+                font-size: 1.2em;
+            }
+
             /* Información de la API */
             .swagger-ui .info {
-                margin: 30px 0;
-                padding: 25px;
-                background: #f8f9fa;
-                border-left: 4px solid #1abc9c;
-                border-radius: 6px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                margin: 2rem 0;
+                padding: 2.5rem;
+                background: linear-gradient(135deg, #ffffff 0%, var(--background-light) 100%);
+                border: 1px solid var(--border-color);
+                border-left: 6px solid var(--primary-color);
+                border-radius: var(--radius-lg);
+                box-shadow: var(--shadow-sm);
+                position: relative;
+            }
+
+            .swagger-ui .info::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                right: 0;
+                width: 100px;
+                height: 100px;
+                background: linear-gradient(45deg, transparent 30%, var(--primary-color) 30%, var(--primary-color) 70%, transparent 70%);
+                opacity: 0.1;
+                border-radius: 0 var(--radius-lg) 0 50px;
             }
             
             .swagger-ui .info .title {
-                color: #2c3e50;
-                font-size: 2.2em;
-                font-weight: 600;
-                margin-bottom: 10px;
+                color: var(--accent-color);
+                font-size: 2.5em;
+                font-weight: 700;
+                margin-bottom: 1rem;
+                text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
             }
             
             .swagger-ui .info .description {
-                color: #5a6c7d;
-                font-size: 1.1em;
-                line-height: 1.7;
+                color: var(--text-secondary);
+                font-size: 1em;
+                line-height: 1.8;
+            }
+
+            .swagger-ui .info .description h1 {
+                color: var(--accent-color);
+                font-size: 1.8em;
+                margin: 1.5rem 0 1rem 0;
+                border-bottom: 2px solid var(--primary-color);
+                padding-bottom: 0.5rem;
+            }
+
+            .swagger-ui .info .description h2 {
+                color: var(--secondary-color);
+                font-size: 1.4em;
+                margin: 1.2rem 0 0.8rem 0;
+            }
+
+            .swagger-ui .info .description h3 {
+                color: var(--primary-dark);
+                font-size: 1.2em;
+                margin: 1rem 0 0.5rem 0;
+            }
+
+            /* ===== TABLAS MEJORADAS ===== */
+            .swagger-ui .info .description table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 1rem 0;
+                background: white;
+                border-radius: var(--radius-md);
+                overflow: hidden;
+                box-shadow: var(--shadow-sm);
+            }
+
+            .swagger-ui .info .description table thead {
+                background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+                color: white;
+            }
+
+            .swagger-ui .info .description table th,
+            .swagger-ui .info .description table td {
+                padding: 1rem;
+                text-align: left;
+                border-bottom: 1px solid var(--border-color);
+            }
+
+            .swagger-ui .info .description table th {
+                font-weight: 600;
+                font-size: 0.9em;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+
+            .swagger-ui .info .description table tbody tr:hover {
+                background-color: rgba(26, 188, 156, 0.05);
+            }
+
+            /* ===== BLOQUES DE CÓDIGO ===== */
+            .swagger-ui .info .description pre {
+                background: rgba(200, 206, 204, 0.1);
+                padding: 0.1rem;
+                border-radius: var(--radius-md);
+                overflow-x: auto;
+                font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                font-size: 0.9em;
+                box-shadow: var(--shadow-sm);
+            }
+
+            .swagger-ui .info .description code {
+                background: rgba(200, 206, 204, 0.1);
+                color: var(--accent-color);
+                padding: 0.45rem 0.9rem;
+                border-radius: var(--radius-sm);
+                font-family: 'JetBrains Mono', monospace;
+                font-size: 1em;
+            }
+
+            /* ===== SEPARADORES Y LÍNEAS ===== */
+            .swagger-ui .info .description hr {
+                border: none;
+                height: 2px;
+                background: linear-gradient(90deg, var(--primary-color) 0%, transparent 100%);
+                margin: 2rem 0;
             }
 
             /* Configuración de servidores */
             .swagger-ui .scheme-container {
-                background: linear-gradient(135deg, #ecf0f1 0%, #bdc3c7 100%);
-                border: 1px solid #95a5a6;
-                color: #2c3e50;
-                padding: 20px;
-                border-radius: 8px;
-                margin: 25px 0;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                background: linear-gradient(135deg, #ecf0f1 0%, #d5dbdb 100%);
+                border: 1px solid var(--border-color);
+                border-radius: var(--radius-md);
+                padding: 1.5rem;
+                margin: 2rem 0;
+                box-shadow: var(--shadow-sm);
+            }
+
+            .swagger-ui .scheme-container .schemes-title {
+                color: var(--accent-color);
+                font-weight: 600;
+                margin-bottom: 1rem;
             }
 
             /* Tags de operaciones */
             .swagger-ui .opblock-tag {
-                background: #d4d9db;
-                color: #000000;
-                border-radius: 6px;
-                padding: 12px 20px;
-                margin: 15px 0;
-                font-size: 1.2em;
-                font-weight: 600;
-                border-left: 4px solid #1abc9c;
+                background: linear-gradient(135deg, #f1f3f3ff 0%, #dfe3e6ff 100%);
+                color: var(--accent-color);
+                border-radius: var(--radius-md);
+                padding: 1rem 1.5rem;
+                margin: 1.5rem 0;
+                font-size: 1.3em;
+                font-weight: 700;
+                border-left: 6px solid var(--primary-color);
+                box-shadow: var(--shadow-sm);
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .swagger-ui .opblock-tag:hover {
+                transform: translateX(5px);
+                box-shadow: var(--shadow-md);
             }
 
             /* Operaciones HTTP */
             .swagger-ui .opblock {
-                border-radius: 6px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-                margin-bottom: 15px;
-                border: 1px solid #e0e0e0;
-            }
-
-            .swagger-ui .opblock.opblock-post {
-                border-left: 4px solid #27ae60;
-            }
-            
-            .swagger-ui .opblock.opblock-get {
-                border-left: 4px solid #3498db;
-            }
-            
-            .swagger-ui .opblock.opblock-put {
-                border-left: 4px solid #f39c12;
-            }
-            
-            .swagger-ui .opblock.opblock-delete {
-                border-left: 4px solid #e74c3c;
-            }
-
-            /* Botones de acción */
-            .swagger-ui .btn {
-                border-radius: 4px;
-                font-weight: 500;
+                border-radius: var(--radius-md);
+                box-shadow: var(--shadow-sm);
+                margin-bottom: 1rem;
+                border: 1px solid var(--border-color);
+                overflow: hidden;
                 transition: all 0.2s ease;
             }
 
+            .swagger-ui .opblock:hover {
+                box-shadow: var(--shadow-md);
+            }
+
+            .swagger-ui .opblock.opblock-post {
+                border-left: 6px solid var(--success-color);
+            }
+
+            .swagger-ui .opblock.opblock-post .opblock-summary {
+                border-color: var(--success-color);
+            }
+            
+            .swagger-ui .opblock.opblock-get {
+                border-left: 6px solid var(--secondary-color);
+            }
+
+            .swagger-ui .opblock.opblock-get .opblock-summary {
+                border-color: var(--secondary-color);
+            }
+
+            .swagger-ui .opblock.opblock-put {
+                border-left: 6px solid var(--warning-color);
+            }
+
+            .swagger-ui .opblock.opblock-put .opblock-summary {
+                border-color: var(--warning-color);
+            }
+
+            .swagger-ui .opblock.opblock-delete {
+                border-left: 6px solid var(--error-color);
+            }
+
+            .swagger-ui .opblock.opblock-delete .opblock-summary {
+                border-color: var(--error-color);
+            }
+
+            /* ===== BOTONES ===== */
+            .swagger-ui .btn {
+                border-radius: var(--radius-sm);
+                font-weight: 600;
+                padding: 0.75rem 1.5rem;
+                transition: all 0.2s ease;
+                font-size: 0.9em;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+
             .swagger-ui .btn.authorize {
-                background-color: #1abc9c;
-                border-color: #1abc9c;
+                background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+                border: none;
                 color: white;
+                box-shadow: var(--shadow-sm);
             }
             
             .swagger-ui .btn.authorize:hover {
-                background-color: #16a085;
-                border-color: #16a085;
+                transform: translateY(-2px);
+                box-shadow: var(--shadow-md);
             }
             
             .swagger-ui .btn.execute {
-                background-color: #3498db;
-                border-color: #3498db;
+                background: linear-gradient(135deg, var(--secondary-color) 0%, #2980b9 100%);
+                border: none;
                 color: white;
+                box-shadow: var(--shadow-sm);
             }
             
             .swagger-ui .btn.execute:hover {
-                background-color: #2980b9;
-                border-color: #2980b9;
+                transform: translateY(-2px);
+                box-shadow: var(--shadow-md);
             }
 
-            /* Respuestas y schemas */
+            /* ===== RESPUESTAS Y SCHEMAS ===== */
             .swagger-ui .responses-inner {
-                background: #f8f9fa;
-                border-radius: 6px;
-                padding: 15px;
+                background: var(--background-light);
+                border-radius: var(--radius-md);
+                padding: 1.5rem;
+                border: 1px solid var(--border-color);
             }
 
             .swagger-ui .model-box {
-                background: #ffffff;
-                border: 1px solid #e0e0e0;
-                border-radius: 6px;
-                padding: 15px;
+                background: white;
+                border: 1px solid var(--border-color);
+                border-radius: var(--radius-md);
+                padding: 1.5rem;
             }
 
-            /* Parámetros */
+            /* ===== PARÁMETROS ===== */
             .swagger-ui .parameters-col_description {
-                color: #5a6c7d;
+                color: var(--text-secondary);
                 font-size: 0.95em;
+                line-height: 1.5;
             }
 
-            /* Tablas */
-            .swagger-ui table {
-                border-collapse: collapse;
-            }
-
-            .swagger-ui table thead tr th {
-                background: #ecf0f1;
-                color: #2c3e50;
-                font-weight: 600;
-                border-bottom: 2px solid #bdc3c7;
-            }
-
-            /* Mejoras de legibilidad */
             .swagger-ui .parameter__name {
-                font-weight: 600;
-                color: #2c3e50;
+                font-weight: 700;
+                color: var(--accent-color);
+                font-family: 'JetBrains Mono', monospace;
             }
 
             .swagger-ui .parameter__type {
-                color: #7f8c8d;
-                font-family: 'Courier New', monospace;
+                color: var(--primary-dark);
+                font-family: 'JetBrains Mono', monospace;
+                background: rgba(26, 188, 156, 0.1);
+                padding: 0.2rem 0.4rem;
+                border-radius: var(--radius-sm);
+                font-size: 0.8em;
             }
 
-            /* Ocultar elementos innecesarios */
+            /* ===== TABLAS GENERALES ===== */
+            .swagger-ui table {
+                border-collapse: collapse;
+                width: 100%;
+            }
+
+            .swagger-ui table thead tr th {
+                background: linear-gradient(135deg, var(--background-light) 0%, #e8f4f8 100%);
+                color: var(--accent-color);
+                font-weight: 700;
+                border-bottom: 2px solid var(--primary-color);
+                padding: 1rem;
+                text-transform: uppercase;
+                font-size: 0.85em;
+                letter-spacing: 0.5px;
+            }
+
+            .swagger-ui table tbody tr td {
+                padding: 0.75rem 1rem;
+                border-bottom: 1px solid var(--border-color);
+            }
+
+            .swagger-ui table tbody tr:nth-child(even) {
+                background-color: rgba(248, 249, 250, 0.5);
+            }
+
+            .swagger-ui table tbody tr:hover {
+                background-color: rgba(26, 188, 156, 0.05);
+            }
+
+            /* ===== ELEMENTOS OCULTOS ===== */
             .swagger-ui .info .base-url,
             .swagger-ui .download-url-wrapper {
                 display: none;
             }
 
-            /* Responsive adjustments */
+            /* ===== RESPONSIVE ===== */
             @media (max-width: 768px) {
                 .swagger-ui .info {
-                    margin: 15px 0;
-                    padding: 20px 15px;
+                    margin: 1rem 0;
+                    padding: 1.5rem;
                 }
                 
                 .swagger-ui .info .title {
-                    font-size: 1.8em;
+                    font-size: 2em;
                 }
+                
+                .swagger-ui .opblock-tag {
+                    padding: 0.75rem 1rem;
+                    font-size: 1.1em;
+                }
+            }
+
+            /* ===== ANIMACIONES SUTILES ===== */
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            .swagger-ui .opblock {
+                animation: fadeIn 0.3s ease-out;
+            }
+
+            /* ===== MEJORAS DE ACCESIBILIDAD ===== */
+            .swagger-ui button:focus,
+            .swagger-ui input:focus,
+            .swagger-ui select:focus {
+                outline: 2px solid var(--primary-color);
+                outline-offset: 2px;
+            }
+
+            /* ===== STATUS INDICATORS ===== */
+            .swagger-ui .response-col_status {
+                font-weight: 700;
+            }
+
+            .swagger-ui .response-col_status[data-code^="2"] {
+                color: var(--success-color);
+            }
+
+            .swagger-ui .response-col_status[data-code^="4"],
+            .swagger-ui .response-col_status[data-code^="5"] {
+                color: var(--error-color);
             }
         `,
         customSiteTitle: "WhatsApp API - Documentación Técnica",
