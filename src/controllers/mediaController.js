@@ -10,10 +10,12 @@
  *       properties:
  *         clientId:
  *           type: string
- *           description: ID del cliente de WhatsApp
+ *           description: Número del cliente de WhatsApp (no solo ID)
+ *           example: "5931234567890"
  *         tel:
  *           type: string
- *           description: Número de teléfono o ID del chat
+ *           description: Número de teléfono o ID del chat (sin @c.us)
+ *           example: "593987654321"
  *         isGroup:
  *           type: boolean
  *           default: false
@@ -27,7 +29,8 @@
  *           properties:
  *             imagePath:
  *               type: string
- *               description: Ruta de la imagen en el servidor
+ *               description: Ruta absoluta de la imagen en el servidor
+ *               example: "/path/to/images/photo.jpg"
  *     StickerRequest:
  *       allOf:
  *         - $ref: '#/components/schemas/MediaRequest'
@@ -37,7 +40,8 @@
  *           properties:
  *             stickerPath:
  *               type: string
- *               description: Ruta del sticker en el servidor
+ *               description: Ruta absoluta del sticker en el servidor
+ *               example: "/path/to/stickers/sticker.webp"
  *     MessageOrFileRequest:
  *       type: object
  *       required:
@@ -46,36 +50,44 @@
  *       properties:
  *         clientId:
  *           type: string
- *           description: ID del cliente de WhatsApp
+ *           description: Número del cliente de WhatsApp
+ *           example: "5931234567890"
  *         chatId:
  *           type: string
- *           description: ID del chat de destino
+ *           description: ID del chat de destino (con formato @c.us o @g.us)
+ *           example: "593987654321@c.us"
  *         message:
  *           type: string
- *           description: Mensaje de texto (opcional si se envía archivo)
+ *           description: Mensaje de texto (requerido si no se envía archivo)
+ *           example: "Hola, ¿cómo estás?"
  *         filePath:
  *           type: string
- *           description: Ruta del archivo (opcional si se envía mensaje)
+ *           description: Ruta absoluta del archivo (requerido si no se envía mensaje)
+ *           example: "/path/to/files/document.pdf"
  *     ProductMessageRequest:
  *       type: object
  *       required:
  *         - clientId
  *         - tel
- *         - mensaje
+ *         - mensaje  
  *         - imagen
  *       properties:
  *         clientId:
  *           type: string
- *           description: ID del cliente de WhatsApp
+ *           description: Número del cliente de WhatsApp
+ *           example: "5931234567890"
  *         tel:
  *           type: string
- *           description: Número de teléfono o ID del chat
+ *           description: Número de teléfono (sin @c.us)
+ *           example: "593987654321"
  *         mensaje:
  *           type: string
  *           description: Descripción del producto
+ *           example: "Producto disponible - $25.99"
  *         imagen:
  *           type: string
- *           description: Imagen del producto en base64 o URL
+ *           description: Imagen del producto en formato base64 (con o sin data:image/ prefix)
+ *           example: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
  *     ProductMessageGroupRequest:
  *       type: object
  *       required:
@@ -86,16 +98,20 @@
  *       properties:
  *         clientId:
  *           type: string
- *           description: ID del cliente de WhatsApp
+ *           description: Número del cliente de WhatsApp
+ *           example: "5931234567890"
  *         groupId:
  *           type: string
- *           description: ID del grupo
+ *           description: ID del grupo (sin @g.us)
+ *           example: "120363025015063966"
  *         mensaje:
  *           type: string
  *           description: Descripción del producto
+ *           example: "¡Oferta especial para el grupo!"
  *         imagen:
  *           type: string
- *           description: Imagen del producto en base64 o URL
+ *           description: Imagen del producto en formato base64
+ *           example: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
  */
 
 const MediaService = require('../services/api/mediaService');
@@ -116,6 +132,7 @@ class MediaController {
      *   post:
      *     tags: [Media]
      *     summary: Enviar imagen
+     *     description: Envía una imagen desde una ruta del servidor a un contacto o grupo de WhatsApp. Valida existencia y tamaño del archivo (máx 64MB).
      *     operationId: sendImage
      *     requestBody:
      *       required: true
@@ -123,6 +140,11 @@ class MediaController {
      *         application/json:
      *           schema:
      *             $ref: '#/components/schemas/ImageRequest'
+     *           example:
+     *             clientId: "5931234567890"
+     *             tel: "593987654321"
+     *             imagePath: "/path/to/images/photo.jpg"
+     *             isGroup: false
      *     responses:
      *       200:
      *         $ref: '#/components/responses/Success'
@@ -153,6 +175,7 @@ class MediaController {
      *   post:
      *     tags: [Media]  
      *     summary: Enviar mensaje o archivo
+     *     description: Envía un mensaje de texto o un archivo a un chat específico. Requiere chatId con formato completo (@c.us o @g.us).
      *     operationId: sendMessageOrFile
      *     requestBody:
      *       required: true
@@ -160,6 +183,10 @@ class MediaController {
      *         application/json:
      *           schema:
      *             $ref: '#/components/schemas/MessageOrFileRequest'
+     *           example:
+     *             clientId: "5931234567890"
+     *             chatId: "593987654321@c.us"
+     *             message: "Hola, ¿cómo estás?"
      *     responses:
      *       200:
      *         $ref: '#/components/responses/Success'
@@ -184,6 +211,7 @@ class MediaController {
      *   post:
      *     tags: [Media]
      *     summary: Enviar sticker
+     *     description: Envía un sticker desde una ruta del servidor. El archivo se envía con la opción sendMediaAsSticker=true.
      *     operationId: sendSticker  
      *     requestBody:
      *       required: true
@@ -191,6 +219,11 @@ class MediaController {
      *         application/json:
      *           schema:
      *             $ref: '#/components/schemas/StickerRequest'
+     *           example:
+     *             clientId: "5931234567890"
+     *             tel: "593987654321"
+     *             stickerPath: "/path/to/stickers/funny.webp"
+     *             isGroup: false
      *     responses:
      *       200:
      *         $ref: '#/components/responses/Success'
@@ -221,6 +254,7 @@ class MediaController {
      *   post:
      *     tags: [Media]
      *     summary: Enviar mensaje de producto
+     *     description: Envía un mensaje con imagen de producto usando base64. La imagen se procesa y almacena temporalmente.
      *     operationId: sendMessageProduct
      *     requestBody:
      *       required: true
@@ -228,6 +262,11 @@ class MediaController {
      *         application/json:
      *           schema:
      *             $ref: '#/components/schemas/ProductMessageRequest'
+     *           example:
+     *             clientId: "5931234567890"
+     *             tel: "593987654321"
+     *             mensaje: "¡Nuevo producto disponible por $29.99!"
+     *             imagen: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
      *     responses:
      *       200:
      *         $ref: '#/components/responses/Success'
@@ -258,6 +297,7 @@ class MediaController {
      *   post:
      *     tags: [Media]
      *     summary: Enviar mensaje de producto a grupo
+     *     description: Envía un mensaje con imagen de producto a un grupo específico usando base64.
      *     operationId: sendMessageProductGroup
      *     requestBody:
      *       required: true
@@ -265,6 +305,11 @@ class MediaController {
      *         application/json:
      *           schema:
      *             $ref: '#/components/schemas/ProductMessageGroupRequest'
+     *           example:
+     *             clientId: "5931234567890"
+     *             groupId: "120363025015063966"
+     *             mensaje: "¡Oferta especial para el grupo - 20% descuento!"
+     *             imagen: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
      *     responses:
      *       200:
      *         $ref: '#/components/responses/Success'
