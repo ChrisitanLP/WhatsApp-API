@@ -8,22 +8,48 @@
  *         id:
  *           type: string
  *           description: ID único del mensaje
- *         from:
- *           type: string
- *           description: Remitente del mensaje
- *         content:
+ *         body:
  *           type: string
  *           description: Contenido del mensaje
  *         timestamp:
+ *           type: integer
+ *           description: Timestamp del mensaje
+ *         from:
  *           type: string
- *           format: date-time
- *           description: Marca de tiempo del mensaje
+ *           description: Remitente del mensaje
+ *         to:
+ *           type: string
+ *           description: Destinatario del mensaje
+ *         fromMe:
+ *           type: boolean
+ *           description: Si el mensaje es enviado por mí
+ *         hasMedia:
+ *           type: boolean
+ *           description: Si el mensaje tiene media
+ *         mediaType:
+ *           type: string
+ *           description: Tipo de media
+ *         mediaMimeType:
+ *           type: string
+ *           description: Tipo MIME de la media
+ *         caption:
+ *           type: string
+ *           description: Leyenda del mensaje
+ *         hasQuotedMsg:
+ *           type: boolean
+ *           description: Si el mensaje cita otro mensaje
+ *         isStarred:
+ *           type: boolean
+ *           description: Si el mensaje está marcado como importante
+ *         isForwarded:
+ *           type: boolean
+ *           description: Si el mensaje es reenviado
  *     Chat:
  *       type: object
  *       properties:
  *         id:
- *           type: string
- *           description: ID único del chat
+ *           type: object
+ *           description: Objeto ID del chat
  *         name:
  *           type: string
  *           description: Nombre del chat o contacto
@@ -43,10 +69,22 @@
  *           type: array
  *           items:
  *             type: object
- *           description: Datos del grupo (si aplica)
+ *             properties:
+ *               id:
+ *                 type: string
+ *               name:
+ *                 type: string
+ *               isAdmin:
+ *                 type: boolean
+ *               isSuperAdmin:
+ *                 type: boolean
+ *           description: Datos de participantes del grupo (si aplica)
  *         client:
  *           type: string
  *           description: ID del cliente de WhatsApp
+ *         participants:
+ *           type: array
+ *           description: Participantes del chat (para grupos)
  *     PaginatedChatsResponse:
  *       type: object
  *       properties:
@@ -209,7 +247,7 @@ class ChatController {
     /**
      * @swagger
      * /api/markChatRead/{clientId}/{tel}/{isGroup}:
-     *   post:
+     *   put:
      *     tags: [Chats]
      *     summary: Marcar chat como leído
      *     operationId: markChatAsRead
@@ -230,7 +268,8 @@ class ChatController {
      *         in: path
      *         required: true
      *         schema:
-     *           type: boolean
+     *           type: string
+     *           enum: ['true', 'false']
      *         description: Indica si es un chat de grupo
      *     responses:
      *       200:
@@ -253,7 +292,7 @@ class ChatController {
     /**
      * @swagger
      * /api/markChatAsUnread:
-     *   post:
+     *   put:
      *     tags: [Chats]
      *     summary: Marcar chat como no leído
      *     operationId: markChatAsUnread
@@ -284,7 +323,7 @@ class ChatController {
     /**
      * @swagger
      * /api/muteChat:
-     *   post:
+     *   put:
      *     tags: [Chats]
      *     summary: Silenciar chat
      *     operationId: muteChat
@@ -321,7 +360,7 @@ class ChatController {
     /**
      * @swagger
      * /api/pinChat:
-     *   post:
+     *   put:
      *     tags: [Chats]
      *     summary: Fijar chat
      *     operationId: pinChat
@@ -339,9 +378,18 @@ class ChatController {
      *             schema:
      *               type: object
      *               properties:
-     *                 pinned:
+     *                 success:
      *                   type: boolean
      *                   example: true
+     *                 message:
+     *                   type: string
+     *                   example: "Operation completed successfully"
+     *                 data:
+     *                   type: object
+     *                   properties:
+     *                     pinned:
+     *                       type: boolean
+     *                       example: true
      *       400:
      *         $ref: '#/components/responses/BadRequest'
      *       404:
@@ -360,7 +408,7 @@ class ChatController {
     /**
      * @swagger
      * /api/unpinChat:
-     *   post:
+     *   put:
      *     tags: [Chats]
      *     summary: Desfijar chat
      *     operationId: unpinChat
@@ -378,9 +426,18 @@ class ChatController {
      *             schema:
      *               type: object
      *               properties:
-     *                 unpinned:
+     *                 success:
      *                   type: boolean
      *                   example: true
+     *                 message:
+     *                   type: string
+     *                   example: "Operation completed successfully"
+     *                 data:
+     *                   type: object
+     *                   properties:
+     *                     unpinned:
+     *                       type: boolean
+     *                       example: true
      *       400:
      *         $ref: '#/components/responses/BadRequest'
      *       404:
@@ -416,6 +473,12 @@ class ChatController {
      *         schema:
      *           type: string
      *         description: Número de teléfono o ID del chat
+     *       - name: isGroup
+     *         in: query
+     *         schema:
+     *           type: boolean
+     *           default: false
+     *         description: Indica si es un chat de grupo
      *     responses:
      *       200:
      *         description: Mensajes del chat obtenidos exitosamente
@@ -424,10 +487,19 @@ class ChatController {
      *             schema:
      *               type: object
      *               properties:
-     *                 messages:
-     *                   type: array
-     *                   items:
-     *                     $ref: '#/components/schemas/ChatMessage'
+     *                 success:
+     *                   type: boolean
+     *                   example: true
+     *                 message:
+     *                   type: string
+     *                   example: "Operation completed successfully"
+     *                 data:
+     *                   type: object
+     *                   properties:
+     *                     messages:
+     *                       type: array
+     *                       items:
+     *                         $ref: '#/components/schemas/ChatMessage'
      *       400:
      *         $ref: '#/components/responses/BadRequest'
      *       404:
