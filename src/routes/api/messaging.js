@@ -69,7 +69,7 @@ router.post(
 
 router.post(
     '/getMessageInfo',
-    ValidationMiddleware.validate(ValidationRules.messaging.getInfo),
+    ValidationMiddleware.validate(ValidationRules.messaging.getMessageInfo),
     asyncHandler(controller.getMessageInfo)
 );
 
