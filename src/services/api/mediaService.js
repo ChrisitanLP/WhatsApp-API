@@ -13,6 +13,9 @@ class MediaService extends BaseWhatsAppService {
     constructor() {
         super();
 
+        this.tempDir = process.env.TEMP_DIR || path.join(process.cwd(), 'temp');
+        this.ensureTempDirExists();
+
         // Circuit breakers específicos para operaciones de media
         this.mediaCircuitBreakers = {
             sendMedia: new CircuitBreaker('send-media', {
@@ -55,13 +58,24 @@ class MediaService extends BaseWhatsAppService {
         };
         
         // Configuración de límites
-        this.MAX_FILE_SIZE = 64 * 1024 * 1024; // 64MB
+        this.MAX_FILE_SIZE = 200 * 1024 * 1024; // 64MB
         this.SUPPORTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
         this.SUPPORTED_VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/ogg'];
         this.SUPPORTED_AUDIO_TYPES = ['audio/mp3', 'audio/wav', 'audio/ogg', 'audio/mp4'];
         
         // Limpieza automática de archivos temporales
         this.startTempFileCleanup();
+    }
+
+    // Método para asegurar que el directorio temporal existe
+    async ensureTempDirExists() {
+        try {
+            await fs.mkdir(this.tempDir, { recursive: true });
+        } catch (error) {
+            logger.error('Error creating temp directory:', error);
+            // Fallback a directorio del sistema
+            this.tempDir = require('os').tmpdir();
+        }
     }
 
     /**
@@ -389,6 +403,11 @@ class MediaService extends BaseWhatsAppService {
         
         try {
             return await this.mediaCircuitBreakers.processMedia.execute(async () => {
+                // Verificar que el mensaje tenga media antes de procesar
+                if (!message.hasMedia) {
+                    return {};
+                }
+
                 const media = await this.attemptDownloadMediaResilient(message);
                 if (!media) {
                     logger.warn(`No media data available for message ${message.id._serialized}`);
@@ -402,17 +421,23 @@ class MediaService extends BaseWhatsAppService {
                 };
 
                 // Procesar según tipo de media
-                if (['sticker', 'image', 'audio', 'ptt'].includes(message.type)) {
-                    mediaData.mediaBase64 = `data:${media.mimetype};base64,${media.data}`;
-                } else if (['document', 'video'].includes(message.type)) {
-                    try {
-                        const extension = path.extname(media.filename) || `.${media.mimetype.split('/')[1]}`;
-                        const tempPath = await this.saveTempMediaResilient(message.id._serialized, extension, media.data);
-                        mediaData.mediaTempUrl = `http://localhost:5000/temp/${path.basename(tempPath)}`;
-                    } catch (error) {
-                        logger.warn(`Error saving temp media for ${message.id._serialized}:`, error.message);
-                        // Continuar sin URL temporal
+                try {
+                    if (['sticker', 'image', 'audio', 'ptt'].includes(message.type)) {
+                        mediaData.mediaBase64 = `data:${media.mimetype};base64,${media.data}`;
+                    } else if (['document', 'video'].includes(message.type)) {
+                        try {
+                            // Usar filename más seguro
+                            const filename = media.filename || `media_${message.id._serialized}`;
+                            const extension = path.extname(filename) || this.getExtensionFromMimeType(media.mimetype);
+                            
+                            const tempPath = await this.saveTempMediaResilient(message.id._serialized, extension, media.data);
+                            mediaData.mediaTempUrl = `http://localhost:5000/temp/${path.basename(tempPath)}`;
+                        } catch (error) {
+                            logger.warn(`Error saving temp media for ${message.id._serialized}:`, error.message);
+                        }
                     }
+                } catch (mediaProcessError) {
+                    logger.warn(`Error processing media content for ${message.id._serialized}:`, mediaProcessError.message);
                 }
 
                 this.mediaMetrics.totalProcessed++;
@@ -424,6 +449,134 @@ class MediaService extends BaseWhatsAppService {
             logger.error(`Error processing message media for ${message.id?._serialized}:`, error);
             return {};
         }
+    }
+
+    /**
+     * Process message media with enhanced performance and error handling
+     * @param {Object} message - WhatsApp message
+     * @returns {Promise<Object>} Media data
+     */
+    async processMessageMediaOptimized(message) {
+        if (this.isShuttingDown) return {};
+        
+        const startTime = Date.now();
+        
+        try {
+            // Validaciones tempranas más estrictas
+            if (!message || !message.hasMedia || !message.id) {
+                return {};
+            }
+
+            // Verificar que el tipo de mensaje es procesable
+            if (!['sticker', 'image', 'audio', 'ptt', 'document', 'video'].includes(message.type)) {
+                logger.debug(`Skipping unsupported media type: ${message.type}`);
+                return {};
+            }
+
+            return await this.mediaCircuitBreakers.processMedia.execute(async () => {
+                // Verificar cache primero con key más específico
+                const cacheKey = `media_${message.id._serialized}_${message.timestamp}`;
+                const cached = this.getFromMediaCache(cacheKey);
+                if (cached) {
+                    return cached;
+                }
+
+                const media = await this.attemptDownloadMediaOptimized(message);
+                if (!media || !media.data) {
+                    logger.debug(`No media data available for message ${message.id._serialized}`);
+                    return {};
+                }
+
+                const mediaData = {
+                    mediaType: message.type,
+                    mediaMimeType: media.mimetype,
+                    caption: message.caption || null
+                };
+
+                // OPTIMIZACIÓN: Procesar según tipo con límites de tamaño
+                try {
+                    // Verificar tamaño antes de procesar
+                    const dataSize = Buffer.byteLength(media.data, 'base64');
+                    const maxSizeForBase64 = 500 * 1024 * 1024; // 5MB máximo para base64
+                    
+                    if (['sticker', 'image'].includes(message.type) && dataSize <= maxSizeForBase64) {
+                        mediaData.mediaBase64 = `data:${media.mimetype};base64,${media.data}`;
+                    } else if (['audio', 'ptt'].includes(message.type) && dataSize <= maxSizeForBase64) {
+                        mediaData.mediaBase64 = `data:${media.mimetype};base64,${media.data}`;
+                    } else if (['document', 'video'].includes(message.type) || dataSize > maxSizeForBase64) {
+                        // Para archivos grandes, crear URL temporal
+                        try {
+                            const filename = this.generateSafeFilename(media.filename || message.id._serialized, media.mimetype);
+                            const tempPath = await this.saveTempMediaOptimized(message.id._serialized, filename, media.data);
+                            mediaData.mediaTempUrl = `http://localhost:5000/temp/${path.basename(tempPath)}`;
+                            mediaData.filename = filename;
+                            mediaData.fileSize = dataSize;
+                        } catch (error) {
+                            logger.warn(`Error saving temp media for ${message.id._serialized}:`, error.message);
+                            mediaData.mediaError = 'Failed to save temporary file';
+                        }
+                    }
+                } catch (mediaProcessError) {
+                    logger.warn(`Error processing media content for ${message.id._serialized}:`, mediaProcessError.message);
+                    mediaData.mediaError = 'Content processing failed';
+                }
+
+                // Cachear resultado exitoso
+                this.setMediaCache(cacheKey, mediaData);
+                this.mediaMetrics.totalProcessed++;
+                this.updateMediaMetrics(startTime, true);
+                
+                return mediaData;
+            });
+        } catch (error) {
+            this.updateMediaMetrics(startTime, false);
+            logger.debug(`Error processing message media for ${message.id?._serialized}:`, error.message);
+            return {};
+        }
+    }
+
+    /**
+     * Generate safe filename from media info
+     * @param {string} originalName - Original filename or message ID
+     * @param {string} mimeType - MIME type
+     * @returns {string} Safe filename
+     * @private
+     */
+    generateSafeFilename(originalName, mimeType) {
+        // Limpiar nombre original
+        const safeName = originalName
+            .replace(/[^a-zA-Z0-9._-]/g, '_')
+            .substring(0, 100); // Limitar longitud
+        
+        // Agregar extensión basada en MIME type si no tiene
+        const extension = this.getExtensionFromMimeType(mimeType) || '.bin';
+        
+        if (!safeName.includes('.') || !safeName.endsWith(extension)) {
+            return `${safeName}${extension}`;
+        }
+        
+        return safeName;
+    }
+
+    getExtensionFromMimeType(mimeType) {
+        const extensions = {
+            'image/jpeg': '.jpg',
+            'image/png': '.png',
+            'image/gif': '.gif',
+            'image/webp': '.webp',
+            'video/mp4': '.mp4',
+            'video/webm': '.webm',
+            'video/ogg': '.ogg',
+            'audio/mp3': '.mp3',
+            'audio/mpeg': '.mp3',
+            'audio/wav': '.wav',
+            'audio/ogg': '.ogg',
+            'audio/mp4': '.m4a',
+            'application/pdf': '.pdf',
+            'application/msword': '.doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx'
+        };
+        return extensions[mimeType] || '.bin';
     }
 
     /**
@@ -461,6 +614,51 @@ class MediaService extends BaseWhatsAppService {
     }
 
     /**
+     * Optimized media download with shorter timeouts and better error handling
+     * @param {Object} message - WhatsApp message
+     * @returns {Promise<Object|null>} Media data or null
+     * @private
+     */
+    async attemptDownloadMediaOptimized(message) {
+        const operationId = `download_media_opt_${message.id._serialized}_${Date.now()}`;
+        
+        try {
+            return await this.retryManager.execute(operationId, async () => {
+                return await this.mediaCircuitBreakers.downloadMedia.execute(async () => {
+                    // Timeout más corto para evitar bloqueos
+                    const media = await Promise.race([
+                        message.downloadMedia(),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('Download timeout')), 15000) // Reducido de 30s a 15s
+                        )
+                    ]);
+                    
+                    // Validaciones adicionales
+                    if (!media) {
+                        throw new Error('No media data received');
+                    }
+                    
+                    if (!media.data || media.data.length === 0) {
+                        throw new Error('Empty media data');
+                    }
+                    
+                    // Verificar tamaño máximo
+                    const dataSize = Buffer.byteLength(media.data, 'base64');
+                    if (dataSize > this.MAX_FILE_SIZE) {
+                        throw new Error(`Media too large: ${dataSize} bytes`);
+                    }
+                    
+                    this.mediaMetrics.totalDownloaded++;
+                    return media;
+                });
+            });
+        } catch (error) {
+            logger.debug(`Failed to download media for message ${message.id._serialized}:`, error.message);
+            return null;
+        }
+    }
+
+    /**
      * Save temporary media file with resilience
      * @param {string} id - Message ID
      * @param {string} extension - File extension
@@ -470,10 +668,18 @@ class MediaService extends BaseWhatsAppService {
      */
     async saveTempMediaResilient(id, extension, data) {
         try {
+            // Asegurar que tempDir existe
+            await this.ensureTempDirExists();
+
             // Generar nombre único para evitar colisiones
-            const uniqueId = `${id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const uniqueId = `${id.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
             const tempPath = path.join(this.tempDir, `media_${uniqueId}${extension}`);
             
+            // Validar que data existe y es válido
+            if (!data || typeof data !== 'string') {
+                throw new ValidationError('Invalid media data provided');
+            }
+
             const buffer = Buffer.from(data, 'base64');
             
             // Validar tamaño
@@ -496,6 +702,59 @@ class MediaService extends BaseWhatsAppService {
             return tempPath;
         } catch (error) {
             logger.error(`Error saving temp media for ${id}:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Optimized temp media saving with better error handling
+     * @param {string} id - Message ID
+     * @param {string} filename - Safe filename
+     * @param {string} data - Base64 data
+     * @returns {Promise<string>} Temp file path
+     * @private
+     */
+    async saveTempMediaOptimized(id, filename, data) {
+        try {
+            // Asegurar que tempDir existe
+            await this.ensureTempDirExists();
+
+            // Generar nombre único para evitar colisiones
+            const uniqueId = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            const tempPath = path.join(this.tempDir, `${uniqueId}_${filename}`);
+            
+            // Validaciones mejoradas
+            if (!data || typeof data !== 'string') {
+                throw new ValidationError('Invalid media data provided');
+            }
+
+            // Procesar en chunks para archivos grandes
+            const buffer = Buffer.from(data, 'base64');
+            
+            // Validar tamaño
+            if (buffer.length > this.MAX_FILE_SIZE) {
+                throw new ValidationError(`Media file too large: ${buffer.length} bytes`);
+            }
+            
+            // Escribir archivo con opciones optimizadas
+            await fs.writeFile(tempPath, buffer, { 
+                flag: 'w',
+                mode: 0o644 
+            });
+            
+            // Programar limpieza del archivo temporal con tiempo reducido
+            setTimeout(async () => {
+                try {
+                    await fs.unlink(tempPath);
+                    logger.debug(`Temp media file cleaned: ${path.basename(tempPath)}`);
+                } catch (error) {
+                    logger.debug(`Error cleaning temp media file ${tempPath}:`, error.message);
+                }
+            }, 180000); // Reducido de 5 minutos a 3 minutos
+            
+            return tempPath;
+        } catch (error) {
+            logger.error(`Error saving temp media for ${id}:`, error.message);
             throw error;
         }
     }
