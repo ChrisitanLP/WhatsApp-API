@@ -129,7 +129,7 @@ const ValidationRules = {
             Validators.string('newContent'),
             Validators.boolean('isGroup')
         ],
-        getInfo: [
+        getMessageInfo: [
             Validators.clientId(),
             Validators.phoneNumber('tel'),
             Validators.messageId(),
