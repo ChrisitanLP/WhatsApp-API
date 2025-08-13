@@ -1,5 +1,6 @@
 // src/config/swagger.js
 const swaggerJSDoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
 const path = require('path');
 
 const swaggerDefinition = {
@@ -8,45 +9,39 @@ const swaggerDefinition = {
         title: 'WhatsApp Business API Integration',
         version: '1.2.1',
         description: `
-            Esta API RESTful proporciona una integración escalable entre WhatsApp Web y sistemas ERP empresariales, específicamente diseñada para Odoo.
+Esta API RESTful proporciona una integración escalable entre WhatsApp Web y sistemas ERP empresariales, específicamente diseñada para Odoo.
 
-            Características Principales:
-                * Gestión de Sesiones
-                    - Autenticación mediante códigos QR
-                    - Manejo automático de reconexiones
-                    - Monitoreo en tiempo real del estado de conexión
-                    - Soporte para múltiples cuentas WhatsApp simultaneas
+## Características Principales
 
-                * Mensajería Avanzada
-                    - Envío de mensajes de texto, multimedia y documentos
-                    - Soporte para mensajes grupales y menciones
-                    - Reenvío, respuesta y edición de mensajes
-                    - Gestión de estados de lectura y mensajes importantes
+### Gestión de Sesiones
+- Autenticación mediante códigos QR
+- Manejo automático de reconexiones
+- Monitoreo en tiempo real del estado de conexión
+- Soporte para múltiples cuentas WhatsApp simultáneas
 
-                * Administración de Contactos
-                    - Sincronización automática de contactos
-                    - Gestión de grupos y participantes
-                    - Búsqueda y filtrado avanzado
-                    - Integración con libreta de direcciones empresarial
+### Mensajería Avanzada
+- Envío de mensajes de texto, multimedia y documentos
+- Soporte para mensajes grupales y menciones
+- Reenvío, respuesta y edición de mensajes
+- Gestión de estados de lectura
 
-                * Archivos Multimedia
-                    - Envío de imágenes, videos, audio y documentos
-                    - Soporte for stickers y emojis animados
-                    - Gestión automática de formatos y compresión
-                    - Validación de tamaños y tipos de archivo
+### Administración de Contactos
+- Sincronización automática de contactos
+- Gestión de grupos y participantes
+- Búsqueda y filtrado avanzado
+- Integración con libreta de direcciones empresarial
 
-            Seguridad y Cumplimiento:
-                - Validación estricta de parámetros de entrada
-                - Sanitización automática de datos
-                - Logging de auditoría completo
-                - Cumplimiento con políticas de WhatsApp Business
+### Archivos Multimedia
+- Envío de imágenes, videos, audio y documentos
+- Soporte para stickers y emojis animados
+- Gestión automática de formatos y compresión
 
-            Rate Limiting y Políticas:
-                - Límite general: 1000 requests/hora por IP
-                - Endpoints críticos: 100 requests/hora
-                - Timeout: 30 segundos por operación
-                - Retry Policy: 3 intentos con backoff exponencial
-            `
+## Seguridad y Límites
+- **Rate Limiting**: 1000 requests/hora por IP, 100 requests/hora para endpoints críticos
+- **Timeout**: 30 segundos por operación
+- **Retry Policy**: 3 intentos con backoff exponencial
+- Validación estricta de parámetros y sanitización automática
+    `
     },
     servers: [
         {
@@ -226,11 +221,31 @@ const swaggerDefinition = {
                 type: 'object',
                 description: 'Información requerida para guardar un nuevo contacto en WhatsApp',
                 properties: {
+                    id: {
+                        type: 'string',
+                        description: 'ID serializado del contacto',
+                        example: '1234567890@c.us'
+                    },
+                    clientId: {
+                        type: 'string',
+                        description: 'ID interno del cliente',
+                        example: 'client_123'
+                    },
+                    phone_number: {
+                        type: 'string',
+                        description: 'Número de teléfono del contacto',
+                        example: '1234567890'
+                    },
                     clientNumber: {
                         type: 'string',
                         description: 'Número del cliente WhatsApp donde se guardará el contacto',
                         pattern: '^[1-9][0-9]{7,14}$',
                         example: '5931234567890'
+                    },
+                    name: {
+                        type: 'string',
+                        description: 'Nombre del contacto',
+                        example: "Juan Pérez"
                     },
                     contactNumber: {
                         type: 'string',
@@ -416,174 +431,18 @@ const swaggerDefinition = {
 const options = {
     definition: swaggerDefinition,
     apis: [
-        path.join(__dirname, '../routes/*.js'),
-        path.join(__dirname, '../routes/api/*.js'),
-        path.join(__dirname, '../controllers/*.js'),
-        path.join(__dirname, '../utils/swagger-annotations.js') // Para anotaciones adicionales
+        path.join(__dirname, '../static/docs/annotation-swagger.js'),
     ]
 };
 
 const swaggerSpec = swaggerJSDoc(options);
 
-// Función para generar documentación automática desde routeGroups
-const generateSwaggerFromRouteGroups = (routeGroups) => {
-    const paths = {};
-    
-    Object.entries(routeGroups).forEach(([groupName, group]) => {
-        const { routes } = group;
-        
-        routes.forEach(route => {
-            const { path: routePath, method, handler } = route;
-            const fullPath = routePath.replace(/:([^/]+)/g, '{$1}'); // Convertir :param a {param}
-            
-            if (!paths[fullPath]) {
-                paths[fullPath] = {};
-            }
-            
-            // Mapear handlers a tags
-            const tagMap = {
-                client: 'Clients',
-                message: 'Messages',
-                chat: 'Chats',
-                contact: 'Contacts',
-                media: 'Media'
-            };
-            
-            const tag = Object.keys(tagMap).find(key => handler.toLowerCase().includes(key)) || 'General';
-            
-            paths[fullPath][method] = {
-                tags: [tagMap[tag] || 'General'],
-                summary: generateSummary(handler),
-                description: generateDescription(handler, routePath),
-                operationId: handler,
-                parameters: extractParameters(routePath),
-                responses: {
-                    '200': { $ref: '#/components/responses/Success' },
-                    '400': { $ref: '#/components/responses/BadRequest' },
-                    '404': { $ref: '#/components/responses/NotFound' },
-                    '429': { $ref: '#/components/responses/TooManyRequests' },
-                    '500': { $ref: '#/components/responses/ServerError' }
-                }
-            };
-            
-            // Agregar requestBody si es POST/PUT/PATCH
-            if (['post', 'put', 'patch'].includes(method)) {
-                paths[fullPath][method].requestBody = generateRequestBody(handler);
-            }
-        });
-    });
-    
-    return paths;
-};
-
-// Funciones auxiliares para generación automática
-const generateSummary = (handler) => {
-    const summaries = {
-        // Clientes
-        'getQrCode': 'Obtener código QR para autenticación de cliente',
-        'getConnectionStatus': 'Verificar estado de conexión del cliente',
-        'addClient': 'Registrar nuevo cliente WhatsApp',
-        'removeClient': 'Eliminar cliente WhatsApp existente',
-        'getClientStatus': 'Consultar estado detallado del cliente',
-        'getAllAuthenticatedAccountsInfo': 'Listar todos los clientes autenticados',
-        
-        // Mensajería
-        'sendMessage': 'Enviar mensaje de texto a contacto individual',
-        'sendGroupMessage': 'Enviar mensaje de texto a grupo',
-        'sendMessageWithMention': 'Enviar mensaje con mención a usuarios específicos',
-        'forwardMessage': 'Reenviar mensaje existente',
-        'replyToMessage': 'Responder a mensaje específico',
-        'deleteMessage': 'Eliminar mensaje enviado',
-        'editMessage': 'Editar mensaje enviado (si es compatible)',
-        
-        // Contactos
-        'getContacts': 'Obtener lista de contactos del cliente',
-        'saveContact': 'Guardar nuevo contacto en WhatsApp',
-        
-        // Media
-        'sendImage': 'Enviar imagen con descripción opcional',
-        'sendSticker': 'Enviar sticker o emoji animado',
-        'sendMessageOrFile': 'Enviar archivo multimedia (imagen, video, audio, documento)',
-        
-        // Chats
-        'getChats': 'Obtener lista de conversaciones activas',
-        'getUnreadChats': 'Obtener conversaciones con mensajes no leídos',
-        'getChatMessages': 'Obtener historial de mensajes de una conversación',
-        'markChatAsRead': 'Marcar conversación como leída'
-    };
-    
-    return summaries[handler] || `Operación: ${handler}`;
-};
-
-const generateDescription = (handler, path) => {
-    const descriptions = {
-        'getQrCode': 'Genera y retorna el código QR necesario para autenticar un cliente WhatsApp. El cliente debe escanear este código desde su aplicación móvil.',
-        'getConnectionStatus': 'Verifica el estado actual de conexión de un cliente específico, incluyendo si está autenticado y listo para enviar mensajes.',
-        'addClient': 'Registra un nuevo cliente WhatsApp en el sistema. Este proceso inicia la generación del código QR para autenticación.',
-        'sendMessage': 'Envía un mensaje de texto a un contacto individual. Requiere que el cliente esté autenticado y el número de destino sea válido.',
-        'getContacts': 'Recupera la lista completa de contactos sincronizados del cliente WhatsApp especificado.'
-    };
-    
-    return descriptions[handler] || `Endpoint para realizar la operación ${handler} en la ruta ${path}`;
-};
-
-const extractParameters = (routePath) => {
-    const params = [];
-    const pathParams = routePath.match(/:([^/]+)/g);
-    
-    if (pathParams) {
-        pathParams.forEach(param => {
-            const paramName = param.slice(1);
-            params.push({
-                name: paramName,
-                in: 'path',
-                required: true,
-                schema: { type: 'string' },
-                description: `Parámetro ${paramName}`
-            });
-        });
-    }
-    
-    return params;
-};
-
-const generateRequestBody = (handler) => {
-    const bodySchemas = {
-        'addClient': {
-        type: 'object',
-        required: ['number'],
-        properties: {
-            number: { type: 'string', description: 'Número de teléfono' }
-        }
-        },
-        'sendMessage': {
-            $ref: '#/components/schemas/MessageData'
-        },
-        'saveContact': {
-            $ref: '#/components/schemas/ContactData'
-        },
-        'sendImage': {
-            $ref: '#/components/schemas/MediaData'
-        }
-    };
-    
-    return {
-        required: true,
-        content: {
-        'application/json': {
-            schema: bodySchemas[handler] || {
-                type: 'object',
-                description: 'Datos de la petición'
-            }
-        }
-        }
-    };
-};
-
 // Middleware para servir documentación
 const setupSwaggerMiddleware = (app) => {
-    const swaggerUi = require('swagger-ui-express');
-    
+    if (!app || typeof app.use !== 'function') {
+        throw new Error('Invalid Express app provided to setupSwaggerMiddleware');
+    }
+
     // Configuración personalizada de Swagger UI - Diseño sobrio y profesional
     const swaggerUiOptions = {
         explorer: true,
@@ -1013,21 +872,11 @@ const setupSwaggerMiddleware = (app) => {
         customfavIcon: "/favicon.ico"
     };
     
-    // Endpoint para JSON spec
-    app.get('/api-docs.json', (req, res) => {
-        res.setHeader('Content-Type', 'application/json');
-        res.send(swaggerSpec);
-    });
-    
     // Swagger UI principal
     app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
-    
-    // Endpoint alternativo
-    app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
 };
 
 module.exports = {
     swaggerSpec,
-    setupSwaggerMiddleware,
-    generateSwaggerFromRouteGroups
+    setupSwaggerMiddleware
 };
