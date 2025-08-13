@@ -9,6 +9,7 @@ const chatController = require('../controllers/chatController');
 const contactController = require('../controllers/contactController');
 const mediaController = require('../controllers/mediaController');
 const messageController = require('../controllers/messageController');
+const metricsHealthController = require('../controllers/systemController');
 
 const { ValidationMiddleware } = require('../middleware/rules');
 const { asyncHandler } = require('../utils/asyncHandler');
@@ -434,24 +435,32 @@ const registerRoutesWithEnhancements = (router, routeGroups, options) => {
 // Register all routes with enhancements
 registerRoutesWithEnhancements(router, routeGroups, { ValidationMiddleware, asyncHandler });
 
+const metricsRateLimit = createRateLimit(60000, 30, 'Too many monitoring requests');
+
+// === HEALTH CHECK ENDPOINTS ===
+router.get('/health-quick', metricsRateLimit, metricsHealthController.getQuickHealth);
+router.get('/health-system', metricsRateLimit, metricsHealthController.getSystemHealth);
+router.get('/health/:serviceName', metricsRateLimit, metricsHealthController.getServiceHealth);
+router.post('/health-force', metricsRateLimit, metricsHealthController.forceSystemHealthCheck);
+
+// === METRICS ENDPOINTS ===
+router.get('/metrics-system', metricsRateLimit, metricsHealthController.getSystemMetrics);
+router.get('/metrics/:serviceName', metricsRateLimit, metricsHealthController.getServiceMetrics);
+
+// === LEGACY COMPATIBILITY ===
+router.get('/stats', clientController.getServiceStats);
+
 // Metrics endpoint
-router.get('/metrics', asyncHandler(async (req, res) => {
+router.get('/metrics', metricsRateLimit, asyncHandler(async (req, res) => {
     try {
-        const metrics = {
-            contacts: await contactController.getMetrics(req, res),
-            timestamp: Date.now(),
-            uptime: process.uptime(),
-            memory: process.memoryUsage(),
-            environment: process.env.NODE_ENV
-        };
-        
-        // Return raw metrics for monitoring systems
-        res.json(metrics);
+        // Usar el controlador centralizado para métricas del sistema
+        const systemMetrics = await metricsHealthController.getSystemMetrics(req, res);
+        // La respuesta ya fue enviada por el controlador centralizado
     } catch (error) {
         logger.error('Error getting system metrics:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to retrieve metrics',
+            message: 'Failed to retrieve system metrics',
             error: error.message
         });
     }
