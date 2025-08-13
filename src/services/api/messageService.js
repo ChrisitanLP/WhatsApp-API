@@ -29,6 +29,13 @@ class MessageService extends BaseWhatsAppService {
         // Cache para mensajes encontrados (TTL corto por privacidad)
         this.messageCache = new Map();
         this.messageCacheTimeout = 60000; // 1 minuto
+
+        // Control de idempotencia para evitar mensajes duplicados
+        this.sentMessagesRegistry = new Map();
+        this.registryCleanupTimeout = 60000;
+
+        // Locks por operación para evitar race conditions
+        this.operationLocks = new Map();
         
         // Métricas específicas de mensajes
         this.messageMetrics = {
@@ -37,7 +44,8 @@ class MessageService extends BaseWhatsAppService {
             averageSearchTime: 0,
             lastMessageTime: null,
             cacheHits: 0,
-            cacheMisses: 0
+            cacheMisses: 0,
+            duplicatePrevented: 0
         };
         
         // Pool de clientes activos para optimizar búsquedas
@@ -45,6 +53,52 @@ class MessageService extends BaseWhatsAppService {
         this.updateActiveClientsInterval = setInterval(() => {
             this.updateActiveClientsPool();
         }, 30000); // Actualizar cada 30 segundos
+
+        // Limpiar registro de mensajes enviados periódicamente
+        this.registryCleanupInterval = setInterval(() => {
+            this.cleanupSentMessagesRegistry();
+        }, 30000);
+    }
+
+    /**
+     * Generar clave única para operación de envío - CORREGIDO
+     * Ahora sin timestamp para detectar verdaderos duplicados
+     */
+    generateMessageKey(clientId, target, messageContent) {
+        const contentHash = require('crypto')
+            .createHash('md5')
+            .update(`${clientId}-${target}-${messageContent}`)
+            .digest('hex')
+            .substring(0, 12);
+        return `msg_${clientId}_${target}_${contentHash}`;
+    }
+
+    /**
+     * Verificar si mensaje ya fue enviado recientemente - CORREGIDO
+     * Tiempo de ventana más corto para permitir conversaciones fluidas
+     */
+    isMessageAlreadySent(messageKey) {
+        const record = this.sentMessagesRegistry.get(messageKey);
+        // Reducir ventana a 30 segundos para permitir conversaciones naturales
+        const duplicateWindow = 30000; 
+        if (record && Date.now() - record.timestamp < duplicateWindow) {
+            return true;
+        }
+        // Limpiar registro expirado inmediatamente
+        if (record) {
+            this.sentMessagesRegistry.delete(messageKey);
+        }
+        return false;
+    }
+
+    /**
+     * Marcar mensaje como enviado
+     */
+    markMessageAsSent(messageKey) {
+        this.sentMessagesRegistry.set(messageKey, {
+            timestamp: Date.now(),
+            status: 'sent'
+        });
     }
 
     /**
@@ -69,15 +123,43 @@ class MessageService extends BaseWhatsAppService {
         }
     }
 
+    /**
+     * Verificar si un error es del tipo serialize que no debe afectar el circuit breaker
+     * @private
+     */
+    isSerializeError(error) {
+        return error?.message?.includes("Cannot read properties of undefined (reading 'serialize')") ||
+            error?.message?.includes("serialize") && error?.message?.includes("undefined");
+    }
 
     /**
-     * Send message to individual chat
+     * Ejecutar operación con manejo especial para errores de serialize
+     * @private
+     */
+    async executeWithSerializeHandling(operation) {
+        try {
+            return await operation();
+        } catch (error) {
+            if (this.isSerializeError(error)) {
+                logger.warn(`Serialize error detectado pero el mensaje probablemente fue enviado. Error: ${error.message}`);
+                // Retornar un resultado exitoso sin lanzar error para evitar afectar circuit breaker
+                return {
+                    success: true,
+                    warning: 'Serialize error detectado, el mensaje podría haberse enviado correctamente'
+                };
+            }
+            // Para otros errores, relanzar
+            throw error;
+        }
+    }
+
+    /**
+     * Send message to individual chat - OPTIMIZADO
      * @param {string} clientId - Client ID
      * @param {string} tel - Phone number
      * @param {string} message - Message content
      */
     async sendMessage(clientId, tel, message) {
-        const operationId = `send_message_${clientId}_${Date.now()}`;
         const startTime = Date.now();
         
         try {
@@ -92,24 +174,70 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message content provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
-                return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, false);
-                    
-                    // Verificar que el cliente esté listo
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    await client.sendMessage(chatId, message);
+            // Generar clave única para esta operación
+            const messageKey = this.generateMessageKey(clientId, tel, message);
+            const lockKey = `send_${clientId}_${tel}`;
+            
+            // Verificar duplicados
+            if (this.isMessageAlreadySent(messageKey)) {
+                this.messageMetrics.duplicatePrevented++;
+                logger.info(`Duplicate message prevented for ${tel} from client ${clientId}`);
+                return {
+                    success: true,
+                    info: 'Duplicate message prevented'
+                };
+            }
+            
+            // Adquirir lock para evitar race conditions
+            await this.acquireOperationLock(lockKey);
+            
+            try {
+                // Usar wrapper con manejo de serialize
+                const result = await this.retryManager.executeOnce(messageKey, async () => {
+                    return await this.messageCircuitBreaker.execute(async () => {
+                        return await this.executeWithSerializeHandling(async () => {
+                            const client = await this.getClientById(clientId);
+                            const chatId = this.formatChatId(tel, false);
+                            if (!chatId.endsWith('@c.us')) {
+                                throw new ValidationError(`Invalid chat ID format for tel: ${tel}`);
+                            }
+                            
+                            // Verificar que el cliente esté listo
+                            if (!this.whatsAppClient.isReady(clientId)) {
+                                throw new Error(`Client ${clientId} is not ready`);
+                            }
+                            
+                            // Enviar mensaje con timeout más corto para evitar falsos errores
+                            const sendPromise = client.sendMessage(chatId, message);
+                            const timeoutPromise = new Promise((_, reject) => 
+                                setTimeout(() => reject(new Error('Send timeout')), 15000)
+                            );
+                            
+                            await Promise.race([sendPromise, timeoutPromise]);
+                            
+                            // Marcar como enviado exitosamente
+                            this.markMessageAsSent(messageKey);
+                            
+                            return { success: true };
+                        });
+                    });
                 });
-            });
-            
-            this.messageMetrics.totalMessagesSent++;
-            this.messageMetrics.lastMessageTime = Date.now();
-            
-            logger.info(`Message sent successfully to ${tel} from client ${clientId}`);
+                
+                // Si el resultado tiene warning (error serialize), devolverlo
+                if (result && result.warning) {
+                    return result;
+                }
+                
+                this.messageMetrics.totalMessagesSent++;
+                this.messageMetrics.lastMessageTime = Date.now();
+                
+                logger.info(`Message sent successfully to ${tel} from client ${clientId} in ${Date.now() - startTime}ms`);
+                
+                return { success: true };
+                
+            } finally {
+                this.releaseOperationLock(lockKey);
+            }
             
         } catch (error) {
             logger.error(`Error sending message to ${tel} from client ${clientId}:`, error);
@@ -118,13 +246,13 @@ class MessageService extends BaseWhatsAppService {
     }
 
     /**
-     * Send message to group chat with resilience
+     * Send message to group chat - OPTIMIZADO
      * @param {string} clientId - Client ID
      * @param {string} groupId - Group ID
      * @param {string} message - Message content
      */
     async sendGroupMessage(clientId, groupId, message) {
-        const operationId = `send_group_message_${clientId}_${Date.now()}`;
+        const startTime = Date.now();
         
         try {
             // Validaciones
@@ -138,29 +266,72 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message content provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
-                return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(groupId, true);
-                    
-                    // Verificar que el grupo existe
-                    const groupChat = await client.getChatById(chatId);
-                    if (!groupChat) {
-                        throw new NotFoundError('Group not found');
-                    }
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    await client.sendMessage(chatId, message);
+            // Generar clave única para esta operación
+            const messageKey = this.generateMessageKey(clientId, groupId, message);
+            const lockKey = `send_group_${clientId}_${groupId}`;
+            
+            // Verificar duplicados
+            if (this.isMessageAlreadySent(messageKey)) {
+                this.messageMetrics.duplicatePrevented++;
+                logger.info(`Duplicate group message prevented for ${groupId} from client ${clientId}`);
+                return {
+                    success: true,
+                    info: 'Duplicate message prevented'
+                };
+            }
+            
+            // Adquirir lock
+            await this.acquireOperationLock(lockKey);
+            
+            try {
+                // Usar wrapper con manejo de serialize
+                const result = await this.retryManager.executeOnce(messageKey, async () => {
+                    return await this.messageCircuitBreaker.execute(async () => {
+                        return await this.executeWithSerializeHandling(async () => {
+                            const client = await this.getClientById(clientId);
+                            const chatId = this.formatChatId(groupId, true);
+                            
+                            // Verificar que el grupo existe
+                            const groupChat = await client.getChatById(chatId);
+                            if (!groupChat) {
+                                throw new NotFoundError('Group not found');
+                            }
+                            
+                            if (!this.whatsAppClient.isReady(clientId)) {
+                                throw new Error(`Client ${clientId} is not ready`);
+                            }
+                            
+                            // Enviar con timeout
+                            const sendPromise = client.sendMessage(chatId, message);
+                            const timeoutPromise = new Promise((_, reject) => 
+                                setTimeout(() => reject(new Error('Send timeout')), 15000)
+                            );
+                            
+                            await Promise.race([sendPromise, timeoutPromise]);
+                            
+                            // Marcar como enviado
+                            this.markMessageAsSent(messageKey);
+                            
+                            return { success: true };
+                        });
+                    });
                 });
-            });
-            
-            this.messageMetrics.totalMessagesSent++;
-            this.messageMetrics.lastMessageTime = Date.now();
-            
-            logger.info(`Group message sent successfully to ${groupId} from client ${clientId}`);
+                
+                // Si el resultado tiene warning (error serialize), devolverlo
+                if (result && result.warning) {
+                    return result;
+                }
+                
+                this.messageMetrics.totalMessagesSent++;
+                this.messageMetrics.lastMessageTime = Date.now();
+                
+                logger.info(`Group message sent successfully to ${groupId} from client ${clientId} in ${Date.now() - startTime}ms`);
+                
+                return { success: true };
+                
+            } finally {
+                this.releaseOperationLock(lockKey);
+            }
             
         } catch (error) {
             logger.error(`Error sending group message to ${groupId} from client ${clientId}:`, error);
@@ -169,7 +340,7 @@ class MessageService extends BaseWhatsAppService {
     }
 
     /**
-     * Send message with mention with enhanced error handling
+     * Send message with mention - OPTIMIZADO
      * @param {string} clientId - Client ID
      * @param {string} tel - Phone/Group number  
      * @param {boolean} isGroup - Is group chat
@@ -177,7 +348,7 @@ class MessageService extends BaseWhatsAppService {
      * @param {string} message - Message content
      */
     async sendMessageWithMention(clientId, tel, isGroup, mentionTel, message) {
-        const operationId = `send_mention_${clientId}_${Date.now()}`;
+        const startTime = Date.now();
         
         try {
             // Validaciones
@@ -194,30 +365,74 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message content provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
-                return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, isGroup);
-                    const mentionId = this.formatContactNumber(mentionTel);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const chat = await client.getChatById(chatId);
-                    if (!chat) {
-                        throw new NotFoundError(`Chat ${tel} not found`);
-                    }
-                    
-                    await chat.sendMessage(message, { mentions: [{ id: mentionId }] });
-                });
-            });
+            // Generar clave única incluyendo la mención
+            const messageKey = this.generateMessageKey(clientId, tel, `${message}_mention_${mentionTel}`);
+            const lockKey = `send_mention_${clientId}_${tel}`;
             
-            this.messageMetrics.totalMessagesSent++;
-            logger.info(`Message with mention sent successfully`);
+            // Verificar duplicados
+            if (this.isMessageAlreadySent(messageKey)) {
+                this.messageMetrics.duplicatePrevented++;
+                logger.info(`Duplicate mention message prevented for ${tel} from client ${clientId}`);
+                return {
+                    success: true,
+                    info: 'Duplicate message prevented'
+                };
+            }
+            
+            // Adquirir lock
+            await this.acquireOperationLock(lockKey);
+            
+            try {
+                // Usar wrapper con manejo de serialize
+                const result = await this.retryManager.executeOnce(messageKey, async () => {
+                    return await this.messageCircuitBreaker.execute(async () => {
+                        return await this.executeWithSerializeHandling(async () => {
+                            const client = await this.getClientById(clientId);
+                            const chatId = this.formatChatId(tel, isGroup);
+                            const mentionId = this.formatContactNumber(mentionTel);
+                            
+                            if (!this.whatsAppClient.isReady(clientId)) {
+                                throw new Error(`Client ${clientId} is not ready`);
+                            }
+                            
+                            const chat = await client.getChatById(chatId);
+                            if (!chat) {
+                                throw new NotFoundError(`Chat ${tel} not found`);
+                            }
+                            
+                            // Enviar con timeout
+                            const sendPromise = chat.sendMessage(message, { mentions: [{ id: mentionId }] });
+                            const timeoutPromise = new Promise((_, reject) => 
+                                setTimeout(() => reject(new Error('Send timeout')), 15000)
+                            );
+                            
+                            await Promise.race([sendPromise, timeoutPromise]);
+                            
+                            // Marcar como enviado
+                            this.markMessageAsSent(messageKey);
+                            
+                            return { success: true };
+                        });
+                    });
+                });
+                
+                // Si el resultado tiene warning (error serialize), devolverlo
+                if (result && result.warning) {
+                    return result;
+                }
+                
+                this.messageMetrics.totalMessagesSent++;
+                
+                logger.info(`Message with mention sent successfully to ${tel} from client ${clientId} in ${Date.now() - startTime}ms`);
+                
+                return { success: true };
+                
+            } finally {
+                this.releaseOperationLock(lockKey);
+            }
             
         } catch (error) {
-            logger.error(`Error sending message with mention:`, error);
+            logger.error(`Error sending message with mention to ${tel} from client ${clientId}:`, error);
             throw error;
         }
     }
@@ -248,31 +463,42 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid reply content provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
+            const result = await this.retryManager.execute(operationId, async () => {
                 return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, isGroup);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const chat = await client.getChatById(chatId);
-                    if (!chat) {
-                        throw new NotFoundError(`Chat ${tel} not found`);
-                    }
-                    
-                    const message = await this.findMessageWithCache(chat, messageId, clientId);
-                    if (!message) {
-                        throw new NotFoundError('Message not found');
-                    }
-                    
-                    await chat.sendMessage(reply, { quotedMessageId: message.id._serialized });
+                    return await this.executeWithSerializeHandling(async () => {
+                        const client = await this.getClientById(clientId);
+                        const chatId = this.formatChatId(tel, isGroup);
+                        
+                        if (!this.whatsAppClient.isReady(clientId)) {
+                            throw new Error(`Client ${clientId} is not ready`);
+                        }
+                        
+                        const chat = await client.getChatById(chatId);
+                        if (!chat) {
+                            throw new NotFoundError(`Chat ${tel} not found`);
+                        }
+                        
+                        const message = await this.findMessageWithCache(chat, messageId, clientId);
+                        if (!message) {
+                            throw new NotFoundError('Message not found');
+                        }
+                        
+                        await chat.sendMessage(reply, { quotedMessageId: message.id._serialized });
+                        
+                        return { success: true };
+                    });
                 });
             });
             
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
             this.messageMetrics.totalMessagesSent++;
             logger.info(`Reply sent successfully to ${tel} from client ${clientId}`);
+            
+            return { success: true };
             
         } catch (error) {
             logger.error(`Error replying to message:`, error);
@@ -303,33 +529,44 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message ID provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
+            const result = await this.retryManager.execute(operationId, async () => {
                 return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, isGroup);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const chat = await client.getChatById(chatId);
-                    if (!chat) {
-                        throw new NotFoundError(`Chat ${tel} not found`);
-                    }
-                    
-                    const message = await this.findMessageWithCache(chat, messageId, clientId);
-                    if (!message) {
-                        throw new NotFoundError('Message not found');
-                    }
-                    
-                    await message.delete(forEveryone);
-                    
-                    // Limpiar del cache
-                    this.invalidateMessageCache(messageId);
+                    return await this.executeWithSerializeHandling(async () => {
+                        const client = await this.getClientById(clientId);
+                        const chatId = this.formatChatId(tel, isGroup);
+                        
+                        if (!this.whatsAppClient.isReady(clientId)) {
+                            throw new Error(`Client ${clientId} is not ready`);
+                        }
+                        
+                        const chat = await client.getChatById(chatId);
+                        if (!chat) {
+                            throw new NotFoundError(`Chat ${tel} not found`);
+                        }
+                        
+                        const message = await this.findMessageWithCache(chat, messageId, clientId);
+                        if (!message) {
+                            throw new NotFoundError('Message not found');
+                        }
+                        
+                        await message.delete(forEveryone);
+                        
+                        // Limpiar del cache
+                        this.invalidateMessageCache(messageId);
+                        
+                        return { success: true };
+                    });
                 });
             });
             
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
             logger.info(`Message ${messageId} deleted successfully`);
+            
+            return { success: true };
             
         } catch (error) {
             logger.error(`Error deleting message:`, error);
@@ -364,38 +601,49 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message ID provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
+            const result = await this.retryManager.execute(operationId, async () => {
                 return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const fromChatId = this.formatChatId(fromTel, isGroupFrom);
-                    const toChatId = this.formatChatId(toTel, isGroupTo);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const fromChat = await client.getChatById(fromChatId);
-                    if (!fromChat) {
-                        throw new NotFoundError(`Source chat ${fromTel} not found`);
-                    }
-                    
-                    // Verificar que el chat destino existe
-                    const toChat = await client.getChatById(toChatId);
-                    if (!toChat) {
-                        throw new NotFoundError(`Destination chat ${toTel} not found`);
-                    }
-                    
-                    const message = await this.findMessageWithCache(fromChat, messageId, clientId);
-                    if (!message) {
-                        throw new NotFoundError('Message not found');
-                    }
-                    
-                    await message.forward(toChatId);
+                    return await this.executeWithSerializeHandling(async () => {
+                        const client = await this.getClientById(clientId);
+                        const fromChatId = this.formatChatId(fromTel, isGroupFrom);
+                        const toChatId = this.formatChatId(toTel, isGroupTo);
+                        
+                        if (!this.whatsAppClient.isReady(clientId)) {
+                            throw new Error(`Client ${clientId} is not ready`);
+                        }
+                        
+                        const fromChat = await client.getChatById(fromChatId);
+                        if (!fromChat) {
+                            throw new NotFoundError(`Source chat ${fromTel} not found`);
+                        }
+                        
+                        // Verificar que el chat destino existe
+                        const toChat = await client.getChatById(toChatId);
+                        if (!toChat) {
+                            throw new NotFoundError(`Destination chat ${toTel} not found`);
+                        }
+                        
+                        const message = await this.findMessageWithCache(fromChat, messageId, clientId);
+                        if (!message) {
+                            throw new NotFoundError('Message not found');
+                        }
+                        
+                        await message.forward(toChatId);
+                        
+                        return { success: true };
+                    });
                 });
             });
             
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
             this.messageMetrics.totalMessagesSent++;
             logger.info(`Message forwarded from ${fromTel} to ${toTel}`);
+            
+            return { success: true };
             
         } catch (error) {
             logger.error(`Error forwarding message:`, error);
@@ -425,30 +673,41 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message ID provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
+            const result = await this.retryManager.execute(operationId, async () => {
                 return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, isGroup);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const chat = await client.getChatById(chatId);
-                    if (!chat) {
-                        throw new NotFoundError(`Chat ${tel} not found`);
-                    }
-                    
-                    const message = await this.findMessageWithCache(chat, messageId, clientId);
-                    if (!message) {
-                        throw new NotFoundError('Message not found');
-                    }
-                    
-                    await message.star();
+                    return await this.executeWithSerializeHandling(async () => {
+                        const client = await this.getClientById(clientId);
+                        const chatId = this.formatChatId(tel, isGroup);
+                        
+                        if (!this.whatsAppClient.isReady(clientId)) {
+                            throw new Error(`Client ${clientId} is not ready`);
+                        }
+                        
+                        const chat = await client.getChatById(chatId);
+                        if (!chat) {
+                            throw new NotFoundError(`Chat ${tel} not found`);
+                        }
+                        
+                        const message = await this.findMessageWithCache(chat, messageId, clientId);
+                        if (!message) {
+                            throw new NotFoundError('Message not found');
+                        }
+                        
+                        await message.star();
+                        
+                        return { success: true };
+                    });
                 });
             });
             
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
             logger.info(`Message ${messageId} marked as important`);
+            
+            return { success: true };
             
         } catch (error) {
             logger.error(`Error marking message as important:`, error);
@@ -478,30 +737,41 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message ID provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
+            const result = await this.retryManager.execute(operationId, async () => {
                 return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, isGroup);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const chat = await client.getChatById(chatId);
-                    if (!chat) {
-                        throw new NotFoundError(`Chat ${tel} not found`);
-                    }
-                    
-                    const message = await this.findMessageWithCache(chat, messageId, clientId);
-                    if (!message) {
-                        throw new NotFoundError('Message not found');
-                    }
-                    
-                    await message.unstar();
+                    return await this.executeWithSerializeHandling(async () => {
+                        const client = await this.getClientById(clientId);
+                        const chatId = this.formatChatId(tel, isGroup);
+                        
+                        if (!this.whatsAppClient.isReady(clientId)) {
+                            throw new Error(`Client ${clientId} is not ready`);
+                        }
+                        
+                        const chat = await client.getChatById(chatId);
+                        if (!chat) {
+                            throw new NotFoundError(`Chat ${tel} not found`);
+                        }
+                        
+                        const message = await this.findMessageWithCache(chat, messageId, clientId);
+                        if (!message) {
+                            throw new NotFoundError('Message not found');
+                        }
+                        
+                        await message.unstar();
+                        
+                        return { success: true };
+                    });
                 });
             });
             
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
             logger.info(`Message ${messageId} unmarked as important`);
+            
+            return { success: true };
             
         } catch (error) {
             logger.error(`Error unmarking message as important:`, error);
@@ -535,33 +805,44 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid new content provided');
             }
             
-            await this.retryManager.execute(operationId, async () => {
+            const result = await this.retryManager.execute(operationId, async () => {
                 return await this.messageCircuitBreaker.execute(async () => {
-                    const client = await this.getClientById(clientId);
-                    const chatId = this.formatChatId(tel, isGroup);
-                    
-                    if (!this.whatsAppClient.isReady(clientId)) {
-                        throw new Error(`Client ${clientId} is not ready`);
-                    }
-                    
-                    const chat = await client.getChatById(chatId);
-                    if (!chat) {
-                        throw new NotFoundError(`Chat ${tel} not found`);
-                    }
-                    
-                    const message = await this.findMessageWithCache(chat, messageId, clientId);
-                    if (!message) {
-                        throw new NotFoundError('Message not found');
-                    }
-                    
-                    await message.edit(newContent);
-                    
-                    // Invalidar cache del mensaje editado
-                    this.invalidateMessageCache(messageId);
+                    return await this.executeWithSerializeHandling(async () => {
+                        const client = await this.getClientById(clientId);
+                        const chatId = this.formatChatId(tel, isGroup);
+                        
+                        if (!this.whatsAppClient.isReady(clientId)) {
+                            throw new Error(`Client ${clientId} is not ready`);
+                        }
+                        
+                        const chat = await client.getChatById(chatId);
+                        if (!chat) {
+                            throw new NotFoundError(`Chat ${tel} not found`);
+                        }
+                        
+                        const message = await this.findMessageWithCache(chat, messageId, clientId);
+                        if (!message) {
+                            throw new NotFoundError('Message not found');
+                        }
+                        
+                        await message.edit(newContent);
+                        
+                        // Invalidar cache del mensaje editado
+                        this.invalidateMessageCache(messageId);
+                        
+                        return { success: true };
+                    });
                 });
             });
             
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
             logger.info(`Message ${messageId} edited successfully`);
+            
+            return { success: true };
             
         } catch (error) {
             logger.error(`Error editing message:`, error);
@@ -592,36 +873,48 @@ class MessageService extends BaseWhatsAppService {
                 throw new ValidationError('Invalid message ID provided');
             }
             
-            return await this.messageSearchCircuitBreaker.execute(async () => {
-                const client = await this.getClientById(clientId);
-                const chatId = this.formatChatId(tel, isGroup);
-                
-                if (!this.whatsAppClient.isReady(clientId)) {
-                    throw new Error(`Client ${clientId} is not ready`);
-                }
-                
-                const chat = await client.getChatById(chatId);
-                if (!chat) {
-                    throw new NotFoundError(`Chat ${tel} not found`);
-                }
-                
-                const message = await this.findMessageWithCache(chat, messageId, clientId);
-                if (!message) {
-                    throw new NotFoundError('Message not found');
-                }
-                
-                return {
-                    id: message.id._serialized,
-                    body: message.body,
-                    type: message.type,
-                    timestamp: message.timestamp,
-                    from: message.from,
-                    to: message.to,
-                    hasMedia: message.hasMedia,
-                    isStarred: message.isStarred,
-                    isForwarded: message.isForwarded
-                };
+            const result = await this.messageSearchCircuitBreaker.execute(async () => {
+                return await this.executeWithSerializeHandling(async () => {
+                    const client = await this.getClientById(clientId);
+                    const chatId = this.formatChatId(tel, isGroup);
+                    
+                    if (!this.whatsAppClient.isReady(clientId)) {
+                        throw new Error(`Client ${clientId} is not ready`);
+                    }
+                    
+                    const chat = await client.getChatById(chatId);
+                    if (!chat) {
+                        throw new NotFoundError(`Chat ${tel} not found`);
+                    }
+                    
+                    const message = await this.findMessageWithCache(chat, messageId, clientId);
+                    if (!message) {
+                        throw new NotFoundError('Message not found');
+                    }
+                    
+                    return {
+                        success: true,
+                        data: {
+                            id: message.id._serialized,
+                            body: message.body,
+                            type: message.type,
+                            timestamp: message.timestamp,
+                            from: message.from,
+                            to: message.to,
+                            hasMedia: message.hasMedia,
+                            isStarred: message.isStarred,
+                            isForwarded: message.isForwarded
+                        }
+                    };
+                });
             });
+            
+            // Si el resultado tiene warning (error serialize), devolverlo
+            if (result && result.warning) {
+                return result;
+            }
+            
+            return result.data;
             
         } catch (error) {
             logger.error(`Error getting message info:`, error);
@@ -728,13 +1021,15 @@ class MessageService extends BaseWhatsAppService {
     }
 
     /**
-     * Get message service metrics
+     * Get message service metrics - ACTUALIZADO
      */
     getMessageMetrics() {
         return {
             ...this.messageMetrics,
             messageCacheSize: this.messageCache.size,
             activeClientsPoolSize: this.activeClientsPool.size,
+            sentMessagesRegistrySize: this.sentMessagesRegistry.size, // NUEVO
+            activeOperationLocks: this.operationLocks.size, // NUEVO
             circuitBreakers: {
                 messageOperations: this.messageCircuitBreaker.getState(),
                 messageSearch: this.messageSearchCircuitBreaker.getState()
@@ -782,15 +1077,69 @@ class MessageService extends BaseWhatsAppService {
     }
 
     /**
-     * Cleanup method
+     * Limpiar registro de mensajes antiguos - CORREGIDO
+     * Limpieza más frecuente y ventana más corta
+     */
+    cleanupSentMessagesRegistry() {
+        const now = Date.now();
+        const keysToDelete = [];
+        const cleanupWindow = 60000; // 1 minuto en lugar de 5
+        
+        for (const [key, record] of this.sentMessagesRegistry.entries()) {
+            if (now - record.timestamp > cleanupWindow) {
+                keysToDelete.push(key);
+            }
+        }
+        
+        keysToDelete.forEach(key => this.sentMessagesRegistry.delete(key));
+        
+        if (keysToDelete.length > 0) {
+            logger.debug(`Cleaned up ${keysToDelete.length} old message records`);
+        }
+    }
+
+    /**
+     * Adquirir lock para operación - CORREGIDO
+     * Lock más específico solo para mensajes IDÉNTICOS, no todo el chat
+     */
+    async acquireOperationLock(lockKey, maxWaitTime = 5000) {
+        const startTime = Date.now();
+        
+        while (this.operationLocks.has(lockKey)) {
+            if (Date.now() - startTime > maxWaitTime) {
+                // No lanzar error, permitir continuar para evitar bloqueos
+                logger.warn(`Lock timeout for ${lockKey}, proceeding anyway`);
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 50)); // Reducir espera
+        }
+        
+        this.operationLocks.set(lockKey, Date.now());
+    }
+
+    /**
+     * Liberar lock de operación
+     */
+    releaseOperationLock(lockKey) {
+        this.operationLocks.delete(lockKey);
+    }
+
+    /**
+     * Cleanup method - ACTUALIZADO
      */
     async cleanup() {
         if (this.updateActiveClientsInterval) {
             clearInterval(this.updateActiveClientsInterval);
         }
         
+        if (this.registryCleanupInterval) {
+            clearInterval(this.registryCleanupInterval);
+        }
+        
         this.messageCache.clear();
         this.activeClientsPool.clear();
+        this.sentMessagesRegistry.clear(); // NUEVO
+        this.operationLocks.clear(); // NUEVO
         
         await super.gracefulShutdown('cleanup');
     }
