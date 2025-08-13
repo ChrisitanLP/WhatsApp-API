@@ -805,21 +805,57 @@ class BaseWhatsAppService {
         return 'https://cdn.playbuzz.com/cdn/913253cd-5a02-4bf2-83e1-18ff2cc7340f/c56157d5-5d8e-4826-89f9-361412275c35.jpg';
     }
 
+    /**
+     * Formatear número de contacto con validación
+     */
     formatContactNumber(number) {
-        return number.includes('@c.us') ? number : `${number}@c.us`;
+        if (!number || typeof number !== 'string') {
+            throw new ValidationError('Invalid number parameter for formatContactNumber');
+        }
+        
+        // Si ya tiene el formato correcto, devolverlo
+        if (number.includes('@c.us')) {
+            return number;
+        }
+        
+        // Limpiar y formatear
+        const cleanNumber = number.replace(/[^\d+]/g, '');
+        return `${cleanNumber}@c.us`;
     }
 
+    /**
+     * Formatear chat ID con validación mejorada
+     */
     formatChatId(tel, isGroup) {
-        return isGroup ? `${tel}@g.us` : `${tel}@c.us`;
+        if (!tel || typeof tel !== 'string') {
+            throw new ValidationError('Invalid tel parameter for formatChatId');
+        }
+        
+        // Limpiar el número de caracteres especiales excepto + al inicio
+        const cleanTel = tel.replace(/[^\d+]/g, '');
+        
+        if (isGroup) {
+            // Para grupos, mantener el formato original si ya tiene @g.us
+            return tel.includes('@g.us') ? tel : `${cleanTel}@g.us`;
+        } else {
+            // Para chats individuales, asegurar formato correcto
+            return tel.includes('@c.us') ? tel : `${cleanTel}@c.us`;
+        }
     }
 
     getDefaultChatData(chat, client) {
         return {
-            ...chat,
-            recentMessageDate: 0,
+            id: chat?.id || { _serialized: `fallback_${Date.now()}` },
+            name: chat?.name || 'Unknown Chat',
+            unreadCount: chat?.unreadCount || 0,
+            timestamp: chat?.lastMessage?.timestamp || Date.now(),
+            recentMessageDate: chat?.lastMessage?.timestamp || 0,
             profilePicUrl: this.getDefaultProfilePic(),
             groupData: [],
-            client: client.options.authStrategy.clientId
+            client: client?.options?.authStrategy?.clientId || 'unknown',
+            isGroup: chat?.isGroup || false,
+            error: true,
+            processingTime: Date.now()
         };
     }
 
@@ -864,7 +900,7 @@ class BaseWhatsAppService {
             logger.debug(`Performing health check on ${clientNumbers.length} clients`);
             
             // MODIFICADO: Procesar clientes en lotes para evitar sobrecarga
-            const batchSize = 3;
+            const batchSize = 2;
             for (let i = 0; i < clientNumbers.length; i += batchSize) {
                 const batch = clientNumbers.slice(i, i + batchSize);
                 
@@ -884,7 +920,7 @@ class BaseWhatsAppService {
                 
                 // Pequeña pausa entre lotes
                 if (i + batchSize < clientNumbers.length) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    await new Promise(resolve => setTimeout(resolve, 800));
                 }
             }
             
@@ -921,7 +957,7 @@ class BaseWhatsAppService {
             
             // NUEVO: Prevenir reconexiones muy frecuentes (mínimo 2 minutos)
             const timeSinceLastReconnection = Date.now() - (monitoring.lastReconnectionAttempt || 0);
-            const minReconnectionInterval = 120000; // 2 minutos
+            const minReconnectionInterval = 90000; // 2 minutos
             
             const isHealthy = await this.performClientHealthCheck(client);
             
@@ -940,7 +976,7 @@ class BaseWhatsAppService {
                 logger.warn(`Client ${number} failed health check (${monitoring.consecutiveFailures} consecutive failures)`);
                 
                 // MODIFICADO: Reconectar solo después de 3 fallos Y respetando intervalo mínimo
-                if (monitoring.consecutiveFailures >= 3 && 
+                if (monitoring.consecutiveFailures >= 2 && 
                     timeSinceLastReconnection > minReconnectionInterval &&
                     !this.whatsAppClient.activeReconnections?.has(number)) {
                     

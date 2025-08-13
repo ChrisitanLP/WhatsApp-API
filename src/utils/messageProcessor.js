@@ -1,6 +1,6 @@
 // utils/messageProcessor.js
 const mime = require('mime-types');
-const logger = require('../config/logger');
+const { logger } = require('../config/logger');
 
 class MessageProcessor {
     async processMessage(number, message) {

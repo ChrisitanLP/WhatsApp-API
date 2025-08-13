@@ -64,6 +64,62 @@ class RetryManager {
             duration: Date.now() - data.startTime
         }));
     }
+
+    /**
+     * Execute operation once without retries but with duplicate detection
+     * Perfect for message sending operations that should not be retried automatically
+     * @param {string} operationId - Unique operation identifier
+     * @param {Function} operation - Operation to execute
+     * @returns {Promise} Operation result
+     */
+    async executeOnce(operationId, operation) {
+        // Verificar si la operación ya está en progreso
+        if (this.operations.has(operationId)) {
+            throw new Error(`Operation ${operationId} is already in progress`);
+        }
+
+        this.operations.set(operationId, { 
+            startTime: Date.now(),
+            type: 'executeOnce' 
+        });
+
+        try {
+            return await operation();
+        } finally {
+            this.operations.delete(operationId);
+        }
+    }
+
+    /**
+     * Execute operation with single attempt and better timeout handling
+     * Ideal for message sending where retries could cause duplicates
+     * @param {string} operationId - Unique operation identifier
+     * @param {Function} operation - Operation to execute
+     * @param {number} timeout - Operation timeout in ms (default: 20000)
+     * @returns {Promise} Operation result
+     */
+    async executeWithTimeout(operationId, operation, timeout = 200) {
+        // Verificar si la operación ya está en progreso
+        if (this.operations.has(operationId)) {
+            throw new Error(`Operation ${operationId} is already in progress`);
+        }
+
+        this.operations.set(operationId, { 
+            startTime: Date.now(),
+            type: 'executeWithTimeout' 
+        });
+
+        try {
+            const operationPromise = operation();
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error(`Operation timeout after ${timeout}ms`)), timeout)
+            );
+            
+            return await Promise.race([operationPromise, timeoutPromise]);
+        } finally {
+            this.operations.delete(operationId);
+        }
+    }
 }
 
 module.exports = RetryManager;
