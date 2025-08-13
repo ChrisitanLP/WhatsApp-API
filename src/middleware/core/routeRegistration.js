@@ -1,4 +1,3 @@
-const { createRouteLimiter } = require('../../middleware/core/security');
 const { logger } = require('../../config/logger');
 
 /**
