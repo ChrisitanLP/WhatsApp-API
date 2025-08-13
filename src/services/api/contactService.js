@@ -10,7 +10,8 @@ class ContactService extends BaseWhatsAppService {
     constructor() {
         super();
         this.CONTACTS_PER_PAGE = 30;
-        this.MAX_CONCURRENT_FETCHES = 5; // Limitar concurrencia
+        this.MAX_CONCURRENT_FETCHES = 15;
+        this.MAX_CONCURRENT_PROFILE_PICS = 20;
         
         // Circuit breaker específico para operaciones de contactos
         this.contactsCircuitBreaker = new CircuitBreaker('contacts-operations', {
@@ -19,12 +20,23 @@ class ContactService extends BaseWhatsAppService {
             monitoringPeriod: 60000
         });
         
-        // Cache de contactos con TTL más largo (5 minutos)
+        // Cache de contactos con TTL más largo 
         this.contactsCache = new Map();
-        this.contactsCacheTimeout = 300000; // 5 minutos
+        this.contactsCacheTimeout = 180000; 
+        this.proactiveContactsCache = new Map(); 
+        this.lastProactiveContactsUpdate = 0;
+        this.PROACTIVE_CONTACTS_INTERVAL = 120000;
+
+        // ESTRUCTURA PREPROCESADA PARA EVITAR REORDENAR
+        this.preprocessedContacts = {
+            allContacts: [],
+            lastUpdate: 0,
+            isUpdating: false
+        };
         
         // Semáforo para controlar concurrencia
         this.fetchSemaphore = this.createSemaphore(this.MAX_CONCURRENT_FETCHES);
+        this.profilePicSemaphore = this.createSemaphore(this.MAX_CONCURRENT_PROFILE_PICS);
         
         // Métricas específicas de contactos
         this.contactMetrics = {
@@ -32,8 +44,123 @@ class ContactService extends BaseWhatsAppService {
             cacheHits: 0,
             cacheMisses: 0,
             averageFetchTime: 0,
-            lastFetchTime: null
+            lastFetchTime: null,
+            profilePicsProcessed: 0,
+            staleDataReturned: 0,
+            proactiveUpdates: 0,
+            profilePicCacheHits: 0
         };
+
+        this.profilePicCache = new Map();
+        this.profilePicCacheTimeout = 6000000; 
+
+        this.initProactiveContactsCache();
+    }
+
+    /**
+     * Inicializar cache proactivo que se actualiza en segundo plano
+     */
+    initProactiveContactsCache() {
+        // Primera actualización después de 8 segundos
+        setTimeout(() => this.updateProactiveContactsCache(), 8000);
+        
+        // Actualizaciones periódicas cada 2 minutos
+        setInterval(() => this.updateProactiveContactsCache(), this.PROACTIVE_CONTACTS_INTERVAL);
+        
+        logger.info('Proactive contacts cache initialized - updates every 2 minutes');
+    }
+
+    /**
+     * Actualizar cache proactivo de contactos en segundo plano
+     */
+    async updateProactiveContactsCache() {
+        if (this.preprocessedContacts.isUpdating || this.isShuttingDown) return;
+        
+        this.preprocessedContacts.isUpdating = true;
+        const startTime = Date.now();
+        
+        try {
+            logger.debug('Starting proactive contacts cache update...');
+            
+            const clients = Array.from(this.whatsAppClient.clients.values());
+            if (!clients.length) {
+                logger.warn('No clients available for proactive contacts cache update');
+                return;
+            }
+
+            // OBTENER TODOS LOS CONTACTOS CON TIMEOUT OPTIMIZADO
+            const allContacts = await this.getAllContactsResilient(clients, true); // Modo proactivo
+            
+            if (allContacts.length === 0) {
+                logger.debug('No contacts found in proactive update');
+                return;
+            }
+
+            // PREORDENAR UNA SOLA VEZ
+            allContacts.sort((a, b) => a.name.localeCompare(b.name));
+
+            // PROCESAR FOTOS DE PERFIL EN SEGUNDO PLANO (SIN BLOQUEAR)
+            this.processProfilePicturesBackground(allContacts);
+
+            // Actualizar estructura preprocesada
+            this.preprocessedContacts = {
+                allContacts,
+                lastUpdate: Date.now(),
+                isUpdating: false
+            };
+
+            // Cachear páginas comunes
+            this.cacheCommonContactPages(allContacts);
+            
+            this.contactMetrics.proactiveUpdates++;
+            const duration = Date.now() - startTime;
+            logger.info(`Proactive contacts cache updated - ${allContacts.length} contacts, ${duration}ms`);
+            
+        } catch (error) {
+            logger.error('Error updating proactive contacts cache:', error);
+        } finally {
+            this.preprocessedContacts.isUpdating = false;
+        }
+    }
+
+    /**
+    * Cachear páginas comunes para respuesta instantánea
+    */
+    cacheCommonContactPages(allContacts) {
+        const commonPaginations = [1, 2, 3]; // Páginas más consultadas
+        
+        commonPaginations.forEach(page => {
+            const start = (page - 1) * this.CONTACTS_PER_PAGE;
+            const end = start + this.CONTACTS_PER_PAGE;
+            
+            const result = allContacts.slice(start, end);
+            const cacheKey = `contacts_page_${page}`;
+            this.setContactsCache(cacheKey, result);
+        });
+    }
+
+    /**
+     * Procesar fotos de perfil en segundo plano sin bloquear
+     */
+    async processProfilePicturesBackground(contacts) {
+        try {
+            const clients = Array.from(this.whatsAppClient.clients.values());
+            
+            // Procesar en lotes pequeños para no sobrecargar
+            const BACKGROUND_BATCH_SIZE = 5;
+            
+            for (let i = 0; i < contacts.length; i += BACKGROUND_BATCH_SIZE) {
+                const batch = contacts.slice(i, i + BACKGROUND_BATCH_SIZE);
+                
+                // Procesar lote sin esperar (fire and forget)
+                setTimeout(async () => {
+                    await this.addProfilePicturesUltraFast(batch, clients, true);
+                }, i * 100); // Escalonado para evitar picos
+            }
+            
+        } catch (error) {
+            logger.debug('Error in background profile pic processing:', error);
+        }
     }
 
     /**
@@ -76,40 +203,65 @@ class ContactService extends BaseWhatsAppService {
         const cacheKey = `contacts_page_${page}`;
         
         try {
-            // Verificar cache primero
+            // ✅ PASO 1: INTENTAR CACHE CALIENTE (RESPUESTA INMEDIATA)
             const cachedContacts = this.getContactsFromCache(cacheKey);
             if (cachedContacts) {
                 this.contactMetrics.cacheHits++;
-                logger.debug(`Cache hit for contacts page ${page}`);
+                logger.debug(`⚡ Cache hit for contacts page ${page} (${Date.now() - startTime}ms)`);
                 return cachedContacts;
             }
-            
+
+            // ✅ PASO 2: USAR ESTRUCTURA PREPROCESADA (MUY RÁPIDO)
+            if (this.preprocessedContacts.allContacts.length > 0 && 
+                Date.now() - this.preprocessedContacts.lastUpdate < this.contactsCacheTimeout * 2) {
+                
+                const { allContacts } = this.preprocessedContacts;
+                const start = (page - 1) * this.CONTACTS_PER_PAGE;
+                const end = start + this.CONTACTS_PER_PAGE;
+                const paginatedContacts = allContacts.slice(start, end);
+                
+                // Agregar fotos de perfil rápidamente
+                const contactsWithPics = await this.addProfilePicturesUltraFast(
+                    paginatedContacts, 
+                    Array.from(this.whatsAppClient.clients.values())
+                );
+                
+                // Cachear para próximas consultas
+                this.setContactsCache(cacheKey, contactsWithPics);
+                
+                logger.info(`📋 Preprocessed contacts served - Page: ${page}, ${Date.now() - startTime}ms`);
+                return contactsWithPics;
+            }
+
+            // ✅ PASO 3: FALLBACK RÁPIDO CON TIMEOUT AGRESIVO (ÚLTIMO RECURSO)
             this.contactMetrics.cacheMisses++;
             
-            // Ejecutar con circuit breaker
-            const contacts = await this.contactsCircuitBreaker.execute(async () => {
-                return await this._fetchContactsWithFallback(page);
-            });
+            const result = await Promise.race([
+                this._fetchContactsUltraFast(page),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Ultra fast contacts fetch timeout')), 2000) // ✅ 2s MAX
+                )
+            ]);
             
-            // Cachear resultado exitoso
-            this.setContactsCache(cacheKey, contacts);
+            this.setContactsCache(cacheKey, result);
             this.updateContactMetrics(startTime, true);
             
-            logger.info(`Contactos obtenidos - Página: ${page}, Total: ${contacts.length}`);
-            return contacts;
+            logger.info(`🚀 Ultra fast contacts - Page: ${page}, ${Date.now() - startTime}ms`);
+            return result;
             
         } catch (error) {
             this.updateContactMetrics(startTime, false);
-            logger.error(`Error al obtener contactos - Página ${page}:`, error);
+            logger.error(`❌ Error fetching contacts page ${page}:`, error);
             
-            // Intentar devolver datos desde cache aunque esté expirado
+            // ✅ PASO 4: INTENTAR CACHE EXPIRADO
             const staleCache = this.getStaleContactsFromCache(cacheKey);
             if (staleCache) {
-                logger.warn(`Returning stale cache for page ${page} due to error`);
+                this.contactMetrics.staleDataReturned++;
+                logger.warn(`📦 Returning stale cache for contacts page ${page}`);
                 return staleCache;
             }
             
-            // Como último recurso, devolver array vacío
+            // ✅ PASO 5: ARRAY VACÍO (ÚLTIMA LÍNEA DE DEFENSA)
             return [];
         }
     }
@@ -118,39 +270,30 @@ class ContactService extends BaseWhatsAppService {
      * Fetch contacts with fallback mechanisms
      * @private
      */
-    async _fetchContactsWithFallback(page) {
+    async _fetchContactsUltraFast(page) {
         await this.init();
 
         const clients = Array.from(this.whatsAppClient.clients.values());
-
         if (!clients.length) {
-            logger.warn('No hay clientes de WhatsApp disponibles');
             return [];
         }
 
-        try {
-            // Intentar obtener contactos de todos los clientes
-            const allContacts = await this.getAllContactsResilient(clients);
-            
-            if (!allContacts.length) {
-                logger.warn('No se pudieron obtener contactos de ningún cliente');
-                return [];
-            }
-            
-            // Ordenar y paginar
-            allContacts.sort((a, b) => a.name.localeCompare(b.name));
-            
-            const start = (page - 1) * this.CONTACTS_PER_PAGE;
-            const end = start + this.CONTACTS_PER_PAGE;
-            const paginatedContacts = allContacts.slice(start, end);
-
-            // Agregar fotos de perfil con timeout
-            return await this.addProfilePicturesResilient(paginatedContacts, clients);
-            
-        } catch (error) {
-            logger.error('Error in _fetchContactsWithFallback:', error);
-            throw error;
+        // ✅ OBTENER CONTACTOS CON TIMEOUT REDUCIDO Y RESULTADOS PARCIALES
+        const allContacts = await this.getAllContactsResilient(clients, false, 1500); // 1.5s timeout
+        
+        if (!allContacts.length) {
+            return [];
         }
+        
+        // Ordenar solo una vez
+        allContacts.sort((a, b) => a.name.localeCompare(b.name));
+        
+        const start = (page - 1) * this.CONTACTS_PER_PAGE;
+        const end = start + this.CONTACTS_PER_PAGE;
+        const paginatedContacts = allContacts.slice(start, end);
+
+        // Agregar fotos de perfil con timeout muy agresivo
+        return await this.addProfilePicturesUltraFast(paginatedContacts, clients);
     }
 
     /**
@@ -202,68 +345,102 @@ class ContactService extends BaseWhatsAppService {
     }
 
     /**
-     * Get all contacts from all clients with resilience
+     * ✅ OBTENER CONTACTOS CON MÁXIMA OPTIMIZACIÓN
      * @param {Array} clients - Array of WhatsApp clients
+     * @param {boolean} isProactive - Si es actualización proactiva
+     * @param {number} customTimeout - Timeout personalizado
      * @returns {Promise<Array>} All contacts
      */
-    async getAllContactsResilient(clients) {
+    async getAllContactsResilient(clients, isProactive = false, customTimeout = null) {
+        // ✅ TIMEOUT DINÁMICO SEGÚN CONTEXTO
+        const timeout = customTimeout || (isProactive ? 3000 : 1500); // Proactivo: 3s, Demanda: 1.5s
+        
+        // ✅ PROCESAMIENTO CONCURRENTE SIN ESPERAR TODOS LOS CLIENTES
         const contactsPromises = clients.map(async (client) => {
-            // Usar semáforo para limitar concurrencia
             const release = await this.fetchSemaphore.acquire();
             
             try {
-                // Timeout por cliente individual
                 return await Promise.race([
-                    this._getContactsFromClient(client),
+                    this._getContactsFromClientOptimized(client),
                     new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('Client timeout')), 15000)
+                        setTimeout(() => reject(new Error(`Client timeout ${timeout}ms`)), timeout)
                     )
                 ]);
             } catch (error) {
-                logger.error(`Error obteniendo contactos para cliente ${client.options?.authStrategy?.clientId}:`, error);
-                return []; // Devolver array vacío en lugar de fallar
+                logger.warn(`⚠️ Contacts client ${client.options?.authStrategy?.clientId} failed: ${error.message}`);
+                return []; // No fallar, devolver array vacío
             } finally {
                 release();
             }
         });
 
-        const contactsResults = await Promise.allSettled(contactsPromises);
+        // ✅ PROCESAMIENTO EN LOTES PARA REDUCIR LATENCIA
+        const BATCH_SIZE = 6; // Procesar 6 clientes a la vez (contactos son más estables)
+        const allResults = [];
         
-        // Filtrar solo resultados exitosos y combinar
-        const successfulResults = contactsResults
-            .filter(result => result.status === 'fulfilled')
-            .map(result => result.value)
-            .flat();
+        for (let i = 0; i < contactsPromises.length; i += BATCH_SIZE) {
+            const batch = contactsPromises.slice(i, i + BATCH_SIZE);
+            const batchResults = await Promise.allSettled(batch);
             
-        // Log de estadísticas
-        const failedCount = contactsResults.length - contactsResults.filter(r => r.status === 'fulfilled').length;
-        if (failedCount > 0) {
-            logger.warn(`Failed to get contacts from ${failedCount}/${clients.length} clients`);
+            // Agregar resultados exitosos inmediatamente
+            batchResults.forEach(result => {
+                if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+                    allResults.push(...result.value);
+                }
+            });
+            
+            // Si no es proactivo, no esperar más lotes si ya tenemos datos suficientes
+            if (!isProactive && allResults.length > 50 && i + BATCH_SIZE < contactsPromises.length) {
+                logger.debug(`⚡ Early contacts return with ${allResults.length} contacts from ${i + BATCH_SIZE} clients`);
+                break;
+            }
         }
         
-        return successfulResults;
+        // Log de estadísticas
+        const processedClients = Math.min(clients.length, allResults.length > 0 ? clients.length : 0);
+        logger.debug(`📊 Processed ${processedClients}/${clients.length} clients, got ${allResults.length} contacts`);
+        
+        return allResults;
     }
 
     /**
      * Get contacts from a single client
      * @private
      */
-    async _getContactsFromClient(client) {
-        const contacts = await client.getContacts();
-        
-        return contacts
-            .filter(contact => 
-                !contact.isGroup && 
-                contact.isMyContact && 
-                !contact.id._serialized.endsWith('@lid')
-            )
-            .map(contact => ({
-                id: contact.id._serialized,
-                phone_number: contact.id.user,
-                name: contact.name || contact.pushname || contact.id._serialized,
-                clientNumber: client.options?.authStrategy?.clientId || 'unknown',
-                clientId: client.id
-            }));
+    async _getContactsFromClientOptimized(client) {
+        try {
+            // ✅ OBTENER CONTACTOS CON TIMEOUT AGRESIVO
+            const contacts = await Promise.race([
+                client.getContacts(),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('getContacts timeout')), 1500)
+                )
+            ]);
+            
+            if (!contacts || contacts.length === 0) return [];
+            
+            // ✅ FILTRADO OPTIMIZADO EN UNA SOLA PASADA
+            return contacts
+                .filter(contact => 
+                    !contact.isGroup && 
+                    contact.isMyContact && 
+                    !contact.id._serialized.endsWith('@lid')
+                )
+                .map(contact => ({
+                    id: contact.id._serialized,
+                    phone_number: contact.id.user,
+                    name: contact.name || contact.pushname || contact.id._serialized,
+                    clientNumber: client.options?.authStrategy?.clientId || 'unknown',
+                    clientId: client.id,
+                    profilePicUrl: this.getDefaultProfilePic(), // Inicializar con default
+                    lastSeen: contact.lastSeen || null,
+                    processingTime: Date.now()
+                }));
+            
+        } catch (error) {
+            logger.debug(`Error in _getContactsFromClientOptimized: ${error.message}`);
+            return [];
+        }
     }
 
     /**
@@ -272,48 +449,68 @@ class ContactService extends BaseWhatsAppService {
      * @param {Array} clients - WhatsApp clients
      * @returns {Promise<Array>} Contacts with profile pictures
      */
-    async addProfilePicturesResilient(contacts, clients) {
-        const BATCH_SIZE = 10; // Procesar en lotes
-        const results = [];
+    async addProfilePicturesUltraFast(contacts, clients, isBackground = false) {
+        const timeout = isBackground ? 3000 : 800; // Background más generoso
+        const BATCH_SIZE = isBackground ? 8 : 12; // Batches más grandes si no es background
         
         for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
             const batch = contacts.slice(i, i + BATCH_SIZE);
             
             const batchPromises = batch.map(async (contact) => {
+                const release = await this.profilePicSemaphore.acquire();
+                
                 try {
+                    // ✅ VERIFICAR CACHE DE FOTOS PRIMERO
+                    const cachedPic = this.getProfilePicFromCache(contact.id);
+                    if (cachedPic) {
+                        contact.profilePicUrl = cachedPic;
+                        this.contactMetrics.profilePicCacheHits++;
+                        return contact;
+                    }
+                    
                     const client = clients.find(c => c.id === contact.clientId);
                     
                     if (client) {
-                        // Timeout individual para cada foto
+                        // ✅ TIMEOUT INDIVIDUAL ULTRA-AGRESIVO
                         const profilePicPromise = Promise.race([
                             client.getProfilePicUrl(contact.id),
                             new Promise((_, reject) => 
-                                setTimeout(() => reject(new Error('Profile pic timeout')), 5000)
+                                setTimeout(() => reject(new Error('Profile pic timeout')), timeout)
                             )
                         ]);
                         
-                        contact.profilePicUrl = await profilePicPromise || this.getDefaultProfilePic();
-                    } else {
-                        contact.profilePicUrl = this.getDefaultProfilePic();
+                        const profilePicUrl = await profilePicPromise;
+                        
+                        if (profilePicUrl) {
+                            contact.profilePicUrl = profilePicUrl;
+                            this.setProfilePicCache(contact.id, profilePicUrl);
+                        }
                     }
+                    
+                    this.contactMetrics.profilePicsProcessed++;
+                    
                 } catch (error) {
-                    logger.debug(`Error getting profile pic for ${contact.name}:`, error.message);
-                    contact.profilePicUrl = this.getDefaultProfilePic();
+                    // Silencioso en background, debug en foreground
+                    if (!isBackground) {
+                        logger.debug(`Error getting profile pic for ${contact.name}: ${error.message}`);
+                    }
+                    // Ya tiene profilePicUrl por defecto
+                } finally {
+                    release();
                 }
                 
                 return contact;
             });
             
-            const batchResults = await Promise.allSettled(batchPromises);
-            results.push(...batchResults.map(r => r.value || r.reason));
+            await Promise.allSettled(batchPromises);
             
-            // Pequeña pausa entre lotes para no sobrecargar
-            if (i + BATCH_SIZE < contacts.length) {
-                await new Promise(resolve => setTimeout(resolve, 100));
+            // Pausa mínima entre lotes solo en foreground
+            if (!isBackground && i + BATCH_SIZE < contacts.length) {
+                await new Promise(resolve => setTimeout(resolve, 50));
             }
         }
         
-        return results;
+        return contacts;
     }
 
     /**
@@ -332,6 +529,32 @@ class ContactService extends BaseWhatsAppService {
         return item ? item.value : null;
     }
 
+    /**
+     * Obtener foto de perfil desde cache
+     */
+    getProfilePicFromCache(contactId) {
+        const item = this.profilePicCache.get(contactId);
+        if (item && Date.now() - item.timestamp < this.profilePicCacheTimeout) {
+            return item.value;
+        }
+        return null;
+    }
+
+    /**
+     * Guardar foto de perfil en cache
+     */
+    setProfilePicCache(contactId, profilePicUrl) {
+        this.profilePicCache.set(contactId, {
+            value: profilePicUrl,
+            timestamp: Date.now()
+        });
+        
+        // Limpiar cache si es muy grande
+        if (this.profilePicCache.size > 500) {
+            this.cleanupProfilePicCache();
+        }
+    }
+
     setContactsCache(key, value) {
         this.contactsCache.set(key, {
             value,
@@ -346,6 +569,12 @@ class ContactService extends BaseWhatsAppService {
 
     invalidateContactsCache() {
         this.contactsCache.clear();
+        this.preprocessedContacts = {
+            allContacts: [],
+            lastUpdate: 0,
+            isUpdating: false
+        };
+        // No limpiar profilePicCache ya que las fotos cambian raramente
         logger.debug('Contacts cache invalidated');
     }
 
@@ -363,6 +592,26 @@ class ContactService extends BaseWhatsAppService {
         
         if (keysToDelete.length > 0) {
             logger.debug(`Cleaned up ${keysToDelete.length} expired cache entries`);
+        }
+    }
+
+    /**
+     * Limpiar cache de fotos de perfil
+     */
+    cleanupProfilePicCache() {
+        const now = Date.now();
+        const keysToDelete = [];
+        
+        for (const [key, item] of this.profilePicCache.entries()) {
+            if (now - item.timestamp > this.profilePicCacheTimeout) {
+                keysToDelete.push(key);
+            }
+        }
+        
+        keysToDelete.forEach(key => this.profilePicCache.delete(key));
+        
+        if (keysToDelete.length > 0) {
+            logger.debug(`Cleaned up ${keysToDelete.length} expired profile pic cache entries`);
         }
     }
 
@@ -390,9 +639,15 @@ class ContactService extends BaseWhatsAppService {
         return {
             ...this.contactMetrics,
             cacheSize: this.contactsCache.size,
+            profilePicCacheSize: this.profilePicCache.size,
+            preprocessedContactsCount: this.preprocessedContacts.allContacts.length,
+            lastProactiveUpdate: this.preprocessedContacts.lastUpdate,
+            cacheAge: Date.now() - this.preprocessedContacts.lastUpdate,
             circuitBreakerState: this.contactsCircuitBreaker.getState(),
             cacheHitRate: this.contactMetrics.totalFetches > 0 ? 
-                (this.contactMetrics.cacheHits / this.contactMetrics.totalFetches * 100).toFixed(2) + '%' : '0%'
+                (this.contactMetrics.cacheHits / this.contactMetrics.totalFetches * 100).toFixed(2) + '%' : '0%',
+            profilePicCacheHitRate: this.contactMetrics.profilePicsProcessed > 0 ?
+                (this.contactMetrics.profilePicCacheHits / this.contactMetrics.profilePicsProcessed * 100).toFixed(2) + '%' : '0%'
         };
     }
 
@@ -409,6 +664,13 @@ class ContactService extends BaseWhatsAppService {
             specificIssues: []
         };
 
+        // ✅ VERIFICAR ESTADO DEL CACHE PROACTIVO
+        const cacheAge = Date.now() - this.preprocessedContacts.lastUpdate;
+        if (cacheAge > this.contactsCacheTimeout * 2.5) { // 7.5 minutos
+            contactsHealth.specificIssues.push(`Proactive contacts cache outdated: ${Math.round(cacheAge / 1000)}s`);
+            contactsHealth.status = 'degraded';
+        }
+
         // Verificar circuit breaker específico de contactos
         const cbState = this.contactsCircuitBreaker.getState();
         if (cbState.state === 'OPEN') {
@@ -416,12 +678,12 @@ class ContactService extends BaseWhatsAppService {
             contactsHealth.status = 'degraded';
         }
 
-        // Verificar si hay muchos fallos en cache
-        const cacheHitRate = this.contactMetrics.totalFetches > 0 ? 
-            this.contactMetrics.cacheHits / this.contactMetrics.totalFetches : 0;
+        // Verificar hit rate de cache de fotos de perfil
+        const picCacheHitRate = this.contactMetrics.profilePicsProcessed > 0 ? 
+            this.contactMetrics.profilePicCacheHits / this.contactMetrics.profilePicsProcessed : 0;
         
-        if (cacheHitRate < 0.3 && this.contactMetrics.totalFetches > 10) {
-            contactsHealth.specificIssues.push(`Low cache hit rate: ${(cacheHitRate * 100).toFixed(2)}%`);
+        if (picCacheHitRate < 0.4 && this.contactMetrics.profilePicsProcessed > 20) {
+            contactsHealth.specificIssues.push(`Low profile pic cache hit rate: ${(picCacheHitRate * 100).toFixed(2)}%`);
             contactsHealth.status = contactsHealth.status === 'unhealthy' ? 'unhealthy' : 'degraded';
         }
 
